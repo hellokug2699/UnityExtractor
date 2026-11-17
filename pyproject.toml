@@ -15,6 +15,9 @@ dependencies = []
 [project.scripts]
 unity-extractor = "unity_extractor.cli:main"
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
