@@ -124,3 +124,12 @@ P1.2 已通过 Phigros 真实 APK 验收：7,804 个节点、8,112 条有效边�
 python -m pip install -e ".[dev,unity]"
 python -m pytest -v
 ```
+
+
+## P1.3：资源类型识别与分类（首轮实现）
+
+对象清单新增保守的资源分类字段：`resource_category`、`resource_subcategory`、`classification_confidence` 和 `classification_basis`。首批覆盖图像、音频、模型、材质、动画、场景、脚本、数据、字体、视频和容器类型。
+
+分类只依据精确匹配的 Unity 原生类型名称，不根据对象名称、文件名或扩展名猜测；未知类型保留为 `unknown`。该功能只增加对象元数据，不解码或导出资源 Payload。
+
+当前 P1.3 正在进行首轮实现，尚待完整测试和 Phigros 真实 APK 验收。详细设计见 [P1.3 资源分类文档](docs/P1.3资源分类.md)。
