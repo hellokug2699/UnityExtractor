@@ -2,7 +2,7 @@
 
 面向 Unity 游戏的证据驱动扫描与通用资源检查工具。项目采用模块化设计，将 Unity 容器解析与具体游戏的数据解释分离。
 
-> 当前状态：**P0 已完成，P1 对象枚举已通过真实 APK 验证，P1.1 引用关系分析首轮实现中**。项目通过可选 UnityPy 后端枚举 SerializedFile / AssetBundle 对象，并可选择分析序列化对象引用；当前尚不导出资源文件。
+> 当前状态：**P0、P1 对象枚举、P1.1 引用关系分析已通过 Phigros 真实 APK 验证；P1.2 依赖图分析已实现，等待真实样本验收**。项目通过可选 UnityPy 后端枚举 SerializedFile / AssetBundle 对象，并可分析对象引用及依赖关系；当前尚不导出资源文件。
 
 ## 环境要求
 
@@ -76,11 +76,39 @@ Phigros APK 的真实样本已成功枚举 7,804 个对象，处理 2,683 个容
 
 ## P1.1：对象引用关系（首轮实现）
 
-使用 `--analyze-references` 可额外解析对象的序列化 TypeTree，提取其中的 Unity `PPtr` 引用。输出报告新增顶层 `references` 数组，记录来源对象、目标对象（可解析时）、目标 Path ID、File ID 和解析状态。无法解析的指针仍保留原始 File ID / Path ID，不会伪造目标对象。
+使用 `--analyze-references` 可额外解析对象的序列化 TypeTree，提取其中的 Unity `PPtr` 引用。输出报告新增顶层 `references` 数组，记录来源对象、目标对象（可解析时）、目标 Path ID、File ID 和解析状态。无法解析的指针仍保留原始 File ID / Path ID，不会伪造目标对象。Phigros 真实 APK 样本提取到 8,156 条引用，其中 8,112 条成功解析，44 条保留为未解析外部引用；来源和已解析目标均能在对象清单中找到。
 
 引用分析会读取对象的结构化序列化数据，但不会执行游戏代码，也不会导出或转换纹理、音频、网格等资源。单对象遍历设有节点数和深度上限；某个对象解析失败时记录 warning 并继续处理其他对象。UnityPy 不支持的 TypeTree、缺失的外部文件或无法解析的 PPtr 都可能产生未解析引用。
 
 P1.1 当前为首轮实现，尚需在真实 APK 上验证引用数量、解析率和跨 SerializedFile 引用行为。
+
+## P1.2：资源依赖图分析（首轮实现）
+
+在 P1.1 引用数据上增加 `--analyze-dependencies`，要求同时启用 `--enumerate-objects` 和 `--analyze-references`：
+
+```bash
+unity-extractor /path/to/game.apk \
+  --enumerate-objects \
+  --analyze-references \
+  --analyze-dependencies \
+  --format json \
+  --output dependency-report.json
+```
+
+输出新增顶层 `dependency_graph`：
+- `nodes`：对象节点及直接依赖数、反向引用数；
+- `edges`：从引用对象指向被引用对象，按对象对去重，并保留原始引用条数；
+- `unreferenced_resource_ids`：没有其他对象引用的对象；
+- `isolated_resource_ids`：既不引用其他对象，也没有对象引用它的对象；
+- `terminal_resource_ids`：没有进一步依赖的对象；
+- `cycles`：强连通分量形式表示的循环依赖；
+- `summary`：节点、边、未解析引用、悬空引用、孤立对象和循环数量。
+
+可以通过 `--dependency-root <resource_id>` 指定一个对象，输出从该对象出发的最短依赖链；默认最大深度为 8，可通过 `--dependency-depth` 调整。依赖链只记录每个可达对象的一条最短路径，避免枚举所有可能路径造成组合爆炸。
+
+未解析引用和目标不在对象清单中的悬空引用不会被伪装成有效边，而是单独计数。依赖图仅代表当前扫描输入和已解析 PPtr 所能证明的关系，不等价于游戏运行时的完整加载依赖。
+
+P1.2 当前等待真实 APK 样本验收。
 
 ## 安全与限制
 
