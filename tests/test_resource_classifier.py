@@ -18,6 +18,14 @@ def test_known_unity_types_are_classified_by_exact_type_name():
         "Font": ("font", "font"),
         "VideoClip": ("video", "clip"),
         "AssetBundle": ("container", "asset_bundle"),
+        "Canvas": ("scene", "canvas"),
+        "CanvasRenderer": ("scene", "canvas_renderer"),
+        "CanvasGroup": ("scene", "canvas_group"),
+        "SpriteRenderer": ("scene", "sprite_renderer"),
+        "AudioSource": ("audio", "source"),
+        "ParticleSystem": ("scene", "particle_system"),
+        "ParticleSystemRenderer": ("scene", "particle_system_renderer"),
+        "ParticleSystemForceField": ("scene", "particle_system_force_field"),
     }
 
     for type_name, expected in cases.items():
