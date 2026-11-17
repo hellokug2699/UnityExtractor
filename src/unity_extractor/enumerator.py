@@ -52,6 +52,7 @@ class UnityObjectEnumerator:
         max_objects: int = MAX_OBJECTS,
         include_references: bool = False,
         max_references: int = MAX_REFERENCES,
+        object_callback: Any | None = None,
     ) -> None:
         self.backend = backend or UnityPyBackend()
         self.max_container_bytes = max_container_bytes
@@ -59,6 +60,7 @@ class UnityObjectEnumerator:
         self.max_objects = max_objects
         self.include_references = include_references
         self.max_references = max_references
+        self.object_callback = object_callback
 
     def enumerate(self, input_path: str | os.PathLike[str]) -> EnumerationReport:
         path = Path(input_path).expanduser()
@@ -201,6 +203,13 @@ class UnityObjectEnumerator:
                     report.warnings.append(f"Object limit reached ({self.max_objects}).")
                     return
                 record = self._append_object(obj, logical_source_id, report)
+                if record is not None and self.object_callback is not None:
+                    try:
+                        self.object_callback(obj, record)
+                    except Exception as exc:
+                        warning = f"Resource export failed: {type(exc).__name__}: {exc}"
+                        record.warnings.append(warning)
+                        report.warnings.append(f"{logical_source_id} / Path ID {record.path_id}: {warning}")
                 if record is not None and self.include_references:
                     self._append_references(obj, record, logical_source_id, report)
         except Exception as exc:
