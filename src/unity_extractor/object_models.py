@@ -1,4 +1,4 @@
-"""Canonical, JSON-safe models for P1 object enumeration."""
+"""Canonical, JSON-safe models for P1 object enumeration and references."""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
@@ -23,6 +23,18 @@ class ObjectRecord:
 
 
 @dataclass
+class ObjectReference:
+    """A serialized PPtr edge; unresolved pointers retain their raw identifiers."""
+
+    source_resource_id: str
+    target_resource_id: str | None
+    target_container_id: str | None
+    target_path_id: int
+    file_id: int
+    resolved: bool
+
+
+@dataclass
 class EnumerationReport:
     schema_version: str
     input_path: str
@@ -31,6 +43,7 @@ class EnumerationReport:
     parser_version: str | None = None
     inspected_containers: int = 0
     objects: list[ObjectRecord] = field(default_factory=list)
+    references: list[ObjectReference] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
