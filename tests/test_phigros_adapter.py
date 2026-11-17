@@ -73,13 +73,18 @@ def make_report(
     )
 
 
-def track_entry(key: str, internal_id: str) -> dict:
+def track_entry(
+    key: str,
+    internal_id: str,
+    *,
+    dependency_key: str | None = None,
+) -> dict:
     return {
         "key": key,
         "internal_id": internal_id,
         "provider_id": "AssetBundleProvider",
-        "primary_key": None,
-        "dependency_key": None,
+        "primary_key": key,
+        "dependency_key": dependency_key,
         "resource_type_index": 0,
     }
 
@@ -202,6 +207,69 @@ def test_catalog_associates_charts_music_and_illustrations(tmp_path):
     assert loaded["chart-in"] == "phigros/songs/1001/charts/in.json"
     assert loaded["music-1"] == "phigros/songs/1001/audio/music.wav"
     assert loaded["image-1"] == "phigros/songs/1001/illustrations/Illustration.png"
+
+
+def test_catalog_resolves_short_internal_ids_through_bundle_dependency(tmp_path):
+    chart = make_record("chart-1", "TextAsset", "Chart_IN", "chart.bundle")
+    music = make_record("music-1", "AudioClip", "music", "music.bundle")
+    image = make_record("image-1", "Texture2D", "Illustration", "image.bundle")
+    bundle_container = make_record(
+        "bundle-container", "AssetBundle", "chart.bundle", "chart.bundle"
+    )
+    adapter = PhigrosAdapter()
+    observe_chart(adapter, chart, chart_payload())
+
+    report = make_report(
+        [chart, music, image, bundle_container],
+        [
+            track_entry(
+                "Assets/Tracks/1001/Chart_IN.json",
+                "3",
+                dependency_key="chart-bundle-key",
+            ),
+            track_entry(
+                "Assets/Tracks/1001/music.wav",
+                "d",
+                dependency_key="music-bundle-key",
+            ),
+            track_entry(
+                "Assets/Tracks/1001/Illustration.jpg",
+                "b",
+                dependency_key="image-bundle-key",
+            ),
+            {
+                "key": "chart-bundle-key",
+                "internal_id": "{RuntimePath}/Android/chart.bundle",
+                "provider_id": "AssetBundleProvider",
+                "primary_key": "chart-bundle-key",
+                "dependency_key": None,
+            },
+            {
+                "key": "music-bundle-key",
+                "internal_id": "{RuntimePath}/Android/music.bundle",
+                "provider_id": "AssetBundleProvider",
+                "primary_key": "music-bundle-key",
+                "dependency_key": None,
+            },
+            {
+                "key": "image-bundle-key",
+                "internal_id": "{RuntimePath}/Android/image.bundle",
+                "provider_id": "AssetBundleProvider",
+                "primary_key": "image-bundle-key",
+                "dependency_key": None,
+            },
+        ],
+    )
+
+    result = adapter.analyze(report)
+
+    assert result["summary"]["matched_track_key_count"] == 3
+    assert result["summary"]["unmatched_track_key_count"] == 0
+    song = result["songs"][0]
+    assert song["difficulties"]["IN"]["chart_assets"][0]["resource_id"] == "chart-1"
+    assert [item["resource_id"] for item in song["audio"]] == ["music-1"]
+    assert [item["resource_id"] for item in song["illustrations"]] == ["image-1"]
+    assert all(item["resource_id"] != "bundle-container" for item in song["other_assets"])
 
 
 def test_unmatched_catalog_asset_stays_visible_as_diagnostic():
