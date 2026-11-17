@@ -58,7 +58,11 @@ class UnityPyBackend:
             if depth > MAX_REFERENCE_DEPTH:
                 raise ValueError("Reference traversal depth limit reached.")
 
-            if type(value).__name__ == "PPtr" and hasattr(value, "m_FileID") and hasattr(value, "m_PathID"):
+            if (
+                hasattr(value, "m_FileID")
+                and hasattr(value, "m_PathID")
+                and callable(getattr(value, "deref", None))
+            ):
                 file_id = int(value.m_FileID)
                 path_id = int(value.m_PathID)
                 key = (file_id, path_id)
