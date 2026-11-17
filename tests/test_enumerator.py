@@ -123,3 +123,21 @@ def test_resource_identity_ignores_random_staging_parent_name(tmp_path):
     assert first_report.objects[0].container_id == "sharedassets0.assets"
     assert second_report.objects[0].container_id == "sharedassets0.assets"
     assert first_report.objects[0].resource_id == second_report.objects[0].resource_id
+
+
+def test_non_candidate_files_do_not_consume_container_budget(tmp_path):
+    root = tmp_path / "game"
+    root.mkdir()
+    (root / "large-unrelated.bin").write_bytes(b"x" * 4096)
+    (root / "real.bundle").write_bytes(b"UnityFS" + b"\\0" * 57)
+    backend = FakeBackend([FakeObject(9, "candidate")])
+
+    report = UnityObjectEnumerator(
+        backend=backend,
+        max_container_bytes=1024,
+        max_total_bytes=128,
+    ).enumerate(root)
+
+    assert report.inspected_containers == 1
+    assert len(report.objects) == 1
+    assert not any("Total container byte limit reached" in warning for warning in report.warnings)
