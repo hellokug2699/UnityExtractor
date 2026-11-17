@@ -154,7 +154,7 @@ python -m pytest -v
 建议从导出目录内部创建 ZIP，使 ZIP 内部路径与 Manifest 的相对路径一致，并将清单一并放在 ZIP 根目录：
 
     cd ./unity-export
-    zip -r -1 ../unity-export.zip .
+    zip -r -1 ../unity-export.zip *
 
 安装项目后即可验证：
 
