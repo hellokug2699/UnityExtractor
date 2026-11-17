@@ -16,6 +16,7 @@ MAX_CONTAINERS = 20_000
 MAX_CONTAINER_BYTES = 512 * 1024 * 1024
 MAX_TOTAL_CONTAINER_BYTES = 2 * 1024 * 1024 * 1024
 MAX_OBJECTS = 1_000_000
+MAX_REFERENCES = 2_000_000
 MAX_COMPRESSION_RATIO = 1_000
 COPY_CHUNK_SIZE = 1024 * 1024
 
@@ -50,12 +51,14 @@ class UnityObjectEnumerator:
         max_total_bytes: int = MAX_TOTAL_CONTAINER_BYTES,
         max_objects: int = MAX_OBJECTS,
         include_references: bool = False,
+        max_references: int = MAX_REFERENCES,
     ) -> None:
         self.backend = backend or UnityPyBackend()
         self.max_container_bytes = max_container_bytes
         self.max_total_bytes = max_total_bytes
         self.max_objects = max_objects
         self.include_references = include_references
+        self.max_references = max_references
 
     def enumerate(self, input_path: str | os.PathLike[str]) -> EnumerationReport:
         path = Path(input_path).expanduser()
@@ -282,6 +285,11 @@ class UnityObjectEnumerator:
             return
         try:
             for file_id, target_path_id, target_container_id, resolved in iterator(obj):
+                if len(report.references) >= self.max_references:
+                    warning = f"Reference limit reached ({self.max_references})."
+                    if warning not in report.warnings:
+                        report.warnings.append(warning)
+                    return
                 target_id = (
                     _identity(logical_source_id, target_container_id, int(target_path_id))
                     if resolved and target_container_id
