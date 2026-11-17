@@ -197,10 +197,14 @@ def test_android_fmod_placeholder_allows_unitypy_image_export_import(monkeypatch
     import unity_extractor.resource_exporter as resource_exporter
 
     monkeypatch.setattr(resource_exporter.platform, "system", lambda: "Android")
-    monkeypatch.delitem(sys.modules, "fmod_toolkit", raising=False)
+    previous = sys.modules.pop("fmod_toolkit", None)
+    try:
+        resource_exporter._prepare_unitypy_export_import()
 
-    resource_exporter._prepare_unitypy_export_import()
-
-    fmod_toolkit = sys.modules["fmod_toolkit"]
-    with pytest.raises(RuntimeError, match="unavailable on Android"):
-        fmod_toolkit.raw_to_wav(b"audio", "clip", 2, 44100)
+        fmod_toolkit = sys.modules["fmod_toolkit"]
+        with pytest.raises(RuntimeError, match="unavailable on Android"):
+            fmod_toolkit.raw_to_wav(b"audio", "clip", 2, 44100)
+    finally:
+        sys.modules.pop("fmod_toolkit", None)
+        if previous is not None:
+            sys.modules["fmod_toolkit"] = previous
