@@ -112,6 +112,25 @@ unity-extractor /path/to/game.apk \
 
 对象清单提供保守的资源分类字段：`resource_category`、`resource_subcategory`、`classification_confidence` 和 `classification_basis`。分类依据 Unity 原生类型名称精确匹配；未知类型保留为 `unknown`。该功能只增加对象元数据，不解码或导出资源 Payload。
 
+## 资源导出（P2）
+
+当前资源导出功能处于逐步实现阶段。P2.1 首先支持 `TextAsset`，会在 Unity 容器仍处于加载状态时读取 Payload，避免 APK 临时暂存文件清理后无法再次访问对象。
+
+```bash
+unity-extractor /path/to/game.apk \
+  --enumerate-objects \
+  --export-resources \
+  --export-dir ./unity-export \
+  --format json \
+  --output export-report.json
+```
+
+P2.1 的导出结果写入 `--export-dir` 指定目录：
+- `text/`：TextAsset 内容，以原始字节写出；不假设内容一定是 UTF-8 文本。
+- `export-manifest.json`：记录资源身份、来源容器、Path ID、导出状态、文件相对路径、字节数和 SHA-256。
+- 文件名由清理后的资源名称、Path ID 和资源身份摘要组成；资源名称不会被当作目录路径使用。
+
+单个 TextAsset 读取或写入失败会记录在清单中，并继续处理其他对象。当前版本尚未启用 Texture2D、Sprite 和 AudioClip 导出；这些类型将在后续 P2 子阶段逐步加入。对象枚举报告与导出清单是两个独立输出文件。
 ## 安全与限制
 
 - 不执行游戏包内代码。
