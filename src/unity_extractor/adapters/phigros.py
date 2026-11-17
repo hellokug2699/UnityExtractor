@@ -339,7 +339,7 @@ class PhigrosAdapter:
     @staticmethod
     def _track_entries(key_entries: list[dict[str, Any]]) -> list[dict[str, str]]:
         entries: list[dict[str, str]] = []
-        seen: set[tuple[str, str, str]] = set()
+        seen: set[tuple[str, str, str, str]] = set()
         for item in key_entries:
             key = item.get("key")
             internal_id = item.get("internal_id")
@@ -350,18 +350,38 @@ class PhigrosAdapter:
                 continue
             song_id = match.group("song_id")
             asset = match.group("asset")
-            dedupe = (song_id, asset, internal_id)
+            dependency_key = item.get("dependency_key")
+            dependency_key = dependency_key if isinstance(dependency_key, str) else ""
+            dedupe = (song_id, asset, internal_id, dependency_key)
             if dedupe in seen:
                 continue
             seen.add(dedupe)
             provider = item.get("provider_id")
+            primary_key = item.get("primary_key")
             entries.append({
                 "song_id": song_id,
                 "asset": asset,
                 "internal_id": internal_id,
                 "provider_id": provider if isinstance(provider, str) else "",
+                "primary_key": primary_key if isinstance(primary_key, str) else "",
+                "dependency_key": dependency_key,
             })
         return entries
+
+    @staticmethod
+    def _asset_matches_record(asset: str, record: ObjectRecord) -> bool:
+        stem = Path(asset).stem.casefold()
+        name = (record.name or "").casefold()
+        chart_match = CHART_ASSET_RE.match(asset)
+        if chart_match:
+            return record.type_name == "TextAsset" and name == stem
+        if stem == "music" or stem.startswith("music_"):
+            return record.type_name == "AudioClip" and (
+                name == stem or name.startswith("music_")
+            )
+        if stem.startswith("illustration"):
+            return record.type_name in {"Texture2D", "Sprite"} and name == stem
+        return name == stem
 
     def _associate_songs(
         self,
@@ -373,6 +393,22 @@ class PhigrosAdapter:
             base = _basename(record.source_id)
             if base:
                 objects_by_base.setdefault(base, []).append(record)
+
+        # Addressables track locations can carry a short internal ID (for
+        # example "3" or "a"). Their dependency key points to the bundle
+        # location, whose internal ID is the actual bundle path.
+        bundle_ids_by_key: dict[str, set[str]] = {}
+        for item in report.catalog_key_entries:
+            key = item.get("key")
+            internal_id = item.get("internal_id")
+            if not isinstance(key, str) or not isinstance(internal_id, str):
+                continue
+            if not _basename(internal_id).endswith(".bundle"):
+                continue
+            bundle_ids_by_key.setdefault(key, set()).add(internal_id)
+            primary_key = item.get("primary_key")
+            if isinstance(primary_key, str) and primary_key:
+                bundle_ids_by_key.setdefault(primary_key, set()).add(internal_id)
 
         songs: dict[str, dict[str, Any]] = {}
         matched = 0
@@ -392,7 +428,19 @@ class PhigrosAdapter:
                 "unmatched_assets": [],
                 "diagnostics": [],
             })
-            candidates = objects_by_base.get(_basename(entry["internal_id"]), [])
+            bundle_ids = bundle_ids_by_key.get(entry.get("dependency_key", ""), set())
+            bundle_bases = {_basename(value) for value in bundle_ids}
+            # Keep compatibility with catalogs where the track location itself
+            # directly names the bundle.
+            direct_base = _basename(entry["internal_id"])
+            if direct_base.endswith(".bundle"):
+                bundle_bases.add(direct_base)
+            candidates = [
+                record
+                for base in bundle_bases
+                for record in objects_by_base.get(base, [])
+                if self._asset_matches_record(entry["asset"], record)
+            ]
             if not candidates:
                 unmatched += 1
                 if len(song["unmatched_assets"]) < MAX_UNMATCHED_ASSETS:
