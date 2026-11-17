@@ -47,6 +47,28 @@ def render_text(report: dict) -> str:
                 lines.append(f"      {evidence['description']}{source}")
     else:
         lines.append("  (none)")
+    graph = report.get("dependency_graph")
+    if graph:
+        summary = graph["summary"]
+        lines.extend([
+            "",
+            "Dependency graph:",
+            f"  Nodes: {summary['node_count']}",
+            f"  Edges: {summary['edge_count']}",
+            f"  Unresolved references: {summary['unresolved_reference_count']}",
+            f"  Dangling references: {summary['dangling_reference_count']}",
+            f"  Unreferenced objects: {summary['unreferenced_object_count']}",
+            f"  Isolated objects: {summary['isolated_object_count']}",
+            f"  Cycles: {summary['cycle_count']}",
+        ])
+        if graph["dependency_chain_error"]:
+            lines.append(f"  Dependency chain: {graph['dependency_chain_error']}")
+        elif graph["dependency_chain_root"]:
+            lines.append("  Dependency chain (shortest paths):")
+            for item in graph["dependency_chains"]:
+                lines.append(f"    - depth {item['depth']}: {' -> '.join(item['path'])}")
+            if graph["dependency_chains_truncated"]:
+                lines.append("    (chain output truncated by node limit)")
     if report["warnings"]:
         lines.extend(["", "Warnings:", *[f"  - {item}" for item in report["warnings"]]])
     if report["errors"]:
