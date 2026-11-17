@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -18,13 +19,41 @@ class FakeTextAssetReader:
         return SimpleNamespace(m_Script=self.payload)
 
 
-def make_record(path_id: int, name: str | None = "chart") -> ObjectRecord:
+class FakeImage:
+    def __init__(self, payload=b"fake-png", size=(16, 8), mode="RGBA"):
+        self.payload = payload
+        self.size = size
+        self.mode = mode
+
+    def save(self, path, format=None):
+        assert format == "PNG"
+        with open(path, "wb") as stream:
+            stream.write(self.payload)
+
+
+class FakeImageReader:
+    def __init__(self, *, size=(16, 8), fail=False):
+        self.fail = fail
+        self.parsed = SimpleNamespace(
+            image=FakeImage(size=size),
+            m_Width=size[0],
+            m_Height=size[1],
+            m_TextureFormat=SimpleNamespace(name="RGBA32"),
+        )
+
+    def parse_as_object(self):
+        if self.fail:
+            raise ValueError("synthetic image decode failure")
+        return self.parsed
+
+
+def make_record(path_id: int, name: str | None = "chart", type_name="TextAsset") -> ObjectRecord:
     return ObjectRecord(
         resource_id=f"resource-{path_id:064d}"[-64:],
         source_id="game.apk!/assets/data.bundle",
         container_id="data.assets",
         path_id=path_id,
-        type_name="TextAsset",
+        type_name=type_name,
         name=name,
     )
 
@@ -89,10 +118,72 @@ def test_one_failed_textasset_does_not_prevent_later_exports(tmp_path):
     assert exporter.summary()["exported_object_count"] == 1
 
 
+def test_texture2d_exports_png_and_records_dimensions_and_hash(tmp_path):
+    exporter = ResourceExporter(tmp_path)
+    record = make_record(51, "background", "Texture2D")
+
+    result = exporter.export_object(FakeImageReader(), record)
+
+    assert result["status"] == "exported"
+    artifact = result["artifacts"][0]
+    assert artifact["path"].startswith("images/texture2d/")
+    assert artifact["path"].endswith(".png")
+    output = tmp_path / artifact["path"]
+    assert output.read_bytes() == b"fake-png"
+    assert artifact["sha256"] == hashlib.sha256(b"fake-png").hexdigest()
+    assert result["metadata"] == {
+        "image_width": 16,
+        "image_height": 8,
+        "image_mode": "RGBA",
+        "output_format": "PNG",
+        "source_texture_format": "RGBA32",
+        "source_width": 16,
+        "source_height": 8,
+    }
+
+
+def test_sprite_exports_to_separate_directory(tmp_path):
+    exporter = ResourceExporter(tmp_path)
+    record = make_record(52, "icon", "Sprite")
+
+    result = exporter.export_object(FakeImageReader(), record)
+
+    assert result["status"] == "exported"
+    assert result["artifacts"][0]["path"].startswith("images/sprite/")
+
+
+def test_invalid_or_oversized_image_is_recorded_as_failed(tmp_path):
+    exporter = ResourceExporter(tmp_path)
+    invalid = exporter.export_object(
+        FakeImageReader(size=(0, 8)), make_record(53, "empty", "Texture2D")
+    )
+    oversized = exporter.export_object(
+        FakeImageReader(size=(100_001, 1000)), make_record(54, "huge", "Sprite")
+    )
+
+    assert invalid["status"] == "failed"
+    assert "invalid dimensions" in invalid["warnings"][0]
+    assert oversized["status"] == "failed"
+    assert "safety limit" in oversized["warnings"][0]
+
+
+def test_image_decode_failure_does_not_prevent_later_exports(tmp_path):
+    exporter = ResourceExporter(tmp_path)
+    failed = exporter.export_object(
+        FakeImageReader(fail=True), make_record(55, "bad", "Texture2D")
+    )
+    succeeded = exporter.export_object(
+        FakeImageReader(), make_record(56, "good", "Sprite")
+    )
+
+    assert failed["status"] == "failed"
+    assert succeeded["status"] == "exported"
+
+
 def test_unsupported_types_are_not_added_to_export_manifest(tmp_path):
     exporter = ResourceExporter(tmp_path)
     record = make_record(40)
-    record.type_name = "Texture2D"
+    record.type_name = "Mesh"
 
     assert exporter.export_object(object(), record) is None
     assert exporter.records == []
