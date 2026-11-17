@@ -202,6 +202,31 @@ unity-extractor /path/to/game.apk \
 
 测试 `test_core_modules_contain_no_game_specific_branches` 会检查核心模块不存在 Phigros 分支。新增游戏支持应放在独立 adapter 或后端适配层；如果证据只够支持某个布局，应在报告中保留 `unsupported` / 未解析状态，而不是假设所有 Unity 游戏使用同一资源结构。
 
+## 桌面应用（P6）
+
+安装项目后启动：
+
+```bash
+unity-extractor-desktop
+```
+
+桌面端使用 Python 标准库 Tkinter，不需要额外 GUI 依赖。Linux 若缺少 Tk，请安装系统提供的 `python3-tk` 包。
+
+当前功能：
+
+- 选择 APK / ZIP、游戏目录、Bundle 或 SerializedFile；
+- 配置对象枚举、引用分析、依赖分析、Addressables catalog 和可选 adapter；
+- 后台线程扫描，界面保持响应；
+- 对象列表按分类、类型和文本过滤，并显示来源、Path ID、大小等字段；
+- 选中对象查看完整元数据详情；
+- 导出全部受支持资源，或只导出当前选中的对象；
+- 取消按钮在安全边界停止扫描，日志显示取消、warning、error 和报告摘要；
+- 导出结果继续生成通用 `export-manifest.json`。
+
+选择性导出会在后台重新扫描输入，只导出选中的 `resource_id`，这是为了保证 APK 临时容器仍可访问，不会把整个 APK 常驻解压。当前桌面端只提供对象元数据详情，尚未提供图片、音频或文本的嵌入式预览；预览能力应在后端提供稳定的负载读取接口后再加入。
+
+桌面控制器 [controller.py](file:///workspace/src/unity_extractor/platforms/desktop/controller.py) 不导入 Tkinter，可以在无显示环境中单元测试；界面 [app.py](file:///workspace/src/unity_extractor/platforms/desktop/app.py) 只负责交互和展示。
+
 ## 安全与限制
 
 - 不执行游戏包内代码。

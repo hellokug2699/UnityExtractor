@@ -19,6 +19,7 @@ CORE_MODULES = (
     "resource_exporter.py",
     "addressables.py",
     "preset.py",
+    "workflow.py",
     "object_models.py",
     "dependency_graph.py",
     "resource_classifier.py",

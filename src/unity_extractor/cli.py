@@ -6,7 +6,8 @@ import json
 import sys
 
 from . import __version__
-from .scanner import UnityScanner
+from .adapters.registry import available_adapters, create_adapter
+from .workflow import ScanRequest, run_scan
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-container-mb", type=int, default=512, help="Maximum size of one candidate container in MiB (default: 512)")
     parser.add_argument("--export-resources", action="store_true", help="Export supported Unity resources while enumerating objects")
     parser.add_argument("--export-dir", help="Directory for exported resources and export-manifest.json (requires --export-resources or --apply-plan)")
-    parser.add_argument("--adapter", choices=("phigros",), help="Add a game-specific analysis section (requires --enumerate-objects)")
+    parser.add_argument("--adapter", choices=tuple(available_adapters()), help="Add a game-specific analysis section (requires --enumerate-objects)")
     parser.add_argument("--catalog", action="append", metavar="PATH", help="Additional Addressables JSON catalog used for adapter association (repeatable)")
     parser.add_argument("--apply-plan", metavar="PATH", help="Export selected resources using an adapter export plan (requires --export-dir)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -193,78 +194,32 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.enumerate_objects:
-        from .enumerator import UnityObjectEnumerator
-
-        exporter = None
-        destination_map = None
-        if args.apply_plan:
-            from .preset import load_plan_destinations
-            try:
-                destination_map = load_plan_destinations(args.apply_plan)
-            except ValueError as exc:
-                print(str(exc), file=sys.stderr)
-                return 2
-        if args.export_resources or args.apply_plan:
-            from .resource_exporter import ResourceExporter
-            selected = None
-            if args.apply_plan and not args.export_resources:
-                selected = set(destination_map or {})
-            exporter = ResourceExporter(
-                args.export_dir,
-                destination_map=destination_map,
-                selected_resource_ids=selected,
-            )
-        adapter = None
-        if args.adapter:
-            from .adapters.base import CompositeCallback
-            from .adapters.phigros import PhigrosAdapter
-            adapter = PhigrosAdapter()
-        callbacks = [item for item in (exporter, adapter) if item is not None]
-        callback = None
-        if len(callbacks) == 1:
-            callback = callbacks[0]
-        elif callbacks:
-            callback = CompositeCallback(*callbacks)
+        adapter = create_adapter(args.adapter)
+        request = ScanRequest(
+            input_path=args.input,
+            enumerate_objects=True,
+            analyze_references=args.analyze_references,
+            analyze_dependencies=args.analyze_dependencies,
+            dependency_root=args.dependency_root,
+            dependency_depth=args.dependency_depth,
+            max_container_mb=args.max_container_mb,
+            export_resources=args.export_resources,
+            export_dir=args.export_dir,
+            apply_plan=args.apply_plan,
+            adapter=adapter,
+            catalog_paths=args.catalog or [],
+        )
         try:
-            enumerator = UnityObjectEnumerator(
-                max_container_bytes=args.max_container_mb * 1024 * 1024,
-                include_references=args.analyze_references,
-                object_callback=callback,
-                catalog_paths=args.catalog,
-            )
+            report = run_scan(request)
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
             return 2
-        enumeration = enumerator.enumerate(args.input)
-        report = enumeration.to_dict()
-        if adapter is not None:
-            report["adapter"] = adapter.analyze(enumeration)
-        if exporter is not None:
-            try:
-                manifest_path = exporter.write_manifest()
-                report["resource_export"] = exporter.summary() | {"manifest_path": str(manifest_path)}
-                if destination_map:
-                    exported_ids = {
-                        item["resource_id"] for item in exporter.records
-                    }
-                    missing = sorted(set(destination_map) - exported_ids)
-                    report["resource_export"]["missing_plan_resource_count"] = len(missing)
-                    report["resource_export"]["missing_plan_resource_samples"] = missing[:20]
-            except OSError as exc:
-                report.setdefault("errors", []).append(f"Could not write export manifest: {exc}")
-                report["scan_status"] = "partial" if report.get("objects") else "failed"
-        if args.analyze_dependencies:
-            from .dependency_graph import build_dependency_graph
-
-            report["dependency_graph"] = build_dependency_graph(
-                report["objects"],
-                report["references"],
-                root_resource_id=args.dependency_root,
-                max_depth=args.dependency_depth,
-            )
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
         rendered = json.dumps(report, ensure_ascii=False, indent=2) if args.format == "json" else render_object_text(report)
     else:
-        report = UnityScanner().scan(args.input).to_dict()
+        report = run_scan(ScanRequest(input_path=args.input))
         rendered = json.dumps(report, ensure_ascii=False, indent=2) if args.format == "json" else render_text(report)
     if args.output:
         try:

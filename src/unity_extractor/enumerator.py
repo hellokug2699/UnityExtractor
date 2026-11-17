@@ -6,7 +6,7 @@ import os
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from .addressables import (
     MAX_CATALOG_BYTES,
@@ -50,7 +50,6 @@ def _is_zip_prefix(prefix: bytes) -> bool:
     return any(prefix.startswith(magic) for magic in ZIP_MAGICS)
 
 
-
 def _is_candidate(prefix: bytes) -> bool:
     return any(prefix.startswith(magic) for magic in BUNDLE_MAGICS) or _looks_like_serialized_header(prefix)
 
@@ -84,6 +83,8 @@ class UnityObjectEnumerator:
         max_references: int = MAX_REFERENCES,
         object_callback: Any | None = None,
         catalog_paths: Iterable[str | os.PathLike[str]] | None = None,
+        cancel_event: Any | None = None,
+        progress_callback: Callable[[str, int, int | None], None] | None = None,
     ) -> None:
         self.backend = backend or UnityPyBackend()
         self.max_container_bytes = max_container_bytes
@@ -93,15 +94,46 @@ class UnityObjectEnumerator:
         self.max_references = max_references
         self.object_callback = object_callback
         self.catalog_paths = list(catalog_paths or [])
+        self.cancel_event = cancel_event
+        self.progress_callback = progress_callback
+        self._cancelled = False
         self._catalog_entries: list[
             tuple[dict[str, Any], list[str], list[dict[str, Any]]]
         ] = []
         self._catalog_bytes = 0
 
+    def _is_cancelled(self) -> bool:
+        if self._cancelled:
+            return True
+        event = self.cancel_event
+        if event is not None:
+            try:
+                if event.is_set():
+                    self._cancelled = True
+            except Exception:
+                pass
+        return self._cancelled
+
+    def _mark_cancelled(self, report: EnumerationReport) -> None:
+        self._cancelled = True
+        if "Scan cancelled by user." not in report.warnings:
+            report.warnings.append("Scan cancelled by user.")
+
+    def _progress(self, stage: str, processed: int, total: int | None = None) -> None:
+        callback = self.progress_callback
+        if callback is None:
+            return
+        try:
+            callback(stage, processed, total)
+        except Exception:
+            # Progress observers must never break the scan.
+            pass
+
     def enumerate(self, input_path: str | os.PathLike[str]) -> EnumerationReport:
         path = Path(input_path).expanduser()
         self._catalog_entries = []
         self._catalog_bytes = 0
+        self._cancelled = False
         report = EnumerationReport(
             schema_version="1.0",
             input_path=str(path),
@@ -111,6 +143,10 @@ class UnityObjectEnumerator:
         if not path.exists():
             report.scan_status = "failed"
             report.errors.append("Input path does not exist or is not accessible.")
+            return report
+        if self._is_cancelled():
+            self._mark_cancelled(report)
+            report.scan_status = "cancelled"
             return report
 
         try:
@@ -160,12 +196,16 @@ class UnityObjectEnumerator:
                     break
                 report.catalog_key_entries.extend(key_entries[:remaining])
 
-        if report.errors and report.objects:
+        if self._cancelled:
+            self._mark_cancelled(report)
+            report.scan_status = "cancelled"
+        elif report.errors and report.objects:
             report.scan_status = "partial"
         elif report.errors and not report.objects:
             report.scan_status = "failed"
         elif not report.inspected_containers:
             report.warnings.append("No supported SerializedFile or AssetBundle candidates were found.")
+        self._progress("completed", len(report.objects))
         return report
 
     def _enumerate_directory(
@@ -178,6 +218,9 @@ class UnityObjectEnumerator:
         for current, dirs, names in os.walk(root):
             dirs[:] = [name for name in dirs if name not in {".git", "__pycache__"}]
             for name in names:
+                if self._is_cancelled():
+                    self._mark_cancelled(report)
+                    return
                 if report.inspected_containers >= MAX_CONTAINERS:
                     report.warnings.append(f"Container limit reached ({MAX_CONTAINERS}).")
                     return
@@ -241,6 +284,9 @@ class UnityObjectEnumerator:
     ) -> None:
         with zipfile.ZipFile(archive_path) as archive:
             for info in archive.infolist():
+                if self._is_cancelled():
+                    self._mark_cancelled(report)
+                    return
                 if info.is_dir():
                     continue
                 if report.inspected_containers >= MAX_CONTAINERS:
@@ -401,6 +447,9 @@ class UnityObjectEnumerator:
     def _inspect_extra_catalogs(self, report: EnumerationReport) -> None:
         seen: set[str] = set()
         for value in self.catalog_paths:
+            if self._is_cancelled():
+                self._mark_cancelled(report)
+                return
             path = Path(value).expanduser()
             try:
                 resolved = str(path.resolve())
@@ -513,6 +562,7 @@ class UnityObjectEnumerator:
         try:
             env = self.backend.load(source)
             report.inspected_containers += 1
+            self._progress("containers", report.inspected_containers)
         except Exception as exc:
             report.errors.append(f"{logical_source_id}: parser failed: {type(exc).__name__}: {exc}")
             return
@@ -520,10 +570,15 @@ class UnityObjectEnumerator:
         try:
             objects: Iterable[Any] = env.objects
             for obj in objects:
+                if self._is_cancelled():
+                    self._mark_cancelled(report)
+                    return
                 if len(report.objects) >= self.max_objects:
                     report.warnings.append(f"Object limit reached ({self.max_objects}).")
                     return
                 record = self._append_object(obj, logical_source_id, report)
+                if record is not None:
+                    self._progress("objects", len(report.objects))
                 if record is not None and self.object_callback is not None:
                     try:
                         self.object_callback(obj, record)

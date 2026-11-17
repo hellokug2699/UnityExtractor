@@ -4,6 +4,7 @@ import base64
 import io
 import json
 import struct
+import threading
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -464,5 +465,82 @@ def test_missing_external_catalog_is_a_warning(tmp_path):
 
     assert len(report.objects) == 1
     assert any("does not exist" in warning for warning in report.warnings)
+
+
+def test_cancellation_stops_object_iteration_and_marks_report(tmp_path):
+    source = tmp_path / "fixture.assets"
+    source.write_bytes(b"fixture")
+    cancel_event = threading.Event()
+
+    def callback(obj, record):
+        cancel_event.set()
+
+    report = UnityObjectEnumerator(
+        backend=FakeBackend([
+            FakeObject(1, "one"),
+            FakeObject(2, "two"),
+            FakeObject(3, "three"),
+        ]),
+        object_callback=callback,
+        cancel_event=cancel_event,
+    ).enumerate(source)
+
+    assert report.scan_status == "cancelled"
+    assert len(report.objects) == 1
+    assert "Scan cancelled by user." in report.warnings
+
+
+def test_cancellation_before_start_skips_parsing(tmp_path):
+    source = tmp_path / "fixture.assets"
+    source.write_bytes(b"fixture")
+    cancel_event = threading.Event()
+    cancel_event.set()
+    backend = FakeBackend([FakeObject(1, "one")])
+
+    report = UnityObjectEnumerator(
+        backend=backend,
+        cancel_event=cancel_event,
+    ).enumerate(source)
+
+    assert report.scan_status == "cancelled"
+    assert report.objects == []
+    assert backend.loaded_paths == []
+
+
+def test_progress_callback_reports_containers_objects_and_completion(tmp_path):
+    source = tmp_path / "fixture.assets"
+    source.write_bytes(b"fixture")
+    events = []
+
+    def progress(stage, processed, total):
+        events.append((stage, processed, total))
+
+    report = UnityObjectEnumerator(
+        backend=FakeBackend([FakeObject(1, "one"), FakeObject(2, "two")]),
+        progress_callback=progress,
+    ).enumerate(source)
+
+    assert report.scan_status == "completed"
+    assert ("containers", 1, None) in events
+    assert ("objects", 1, None) in events
+    assert ("objects", 2, None) in events
+    assert events[-1] == ("completed", 2, None)
+
+
+def test_progress_callback_failure_does_not_break_scan(tmp_path):
+    source = tmp_path / "fixture.assets"
+    source.write_bytes(b"fixture")
+
+    def progress(stage, processed, total):
+        raise RuntimeError("observer failure")
+
+    report = UnityObjectEnumerator(
+        backend=FakeBackend([FakeObject(1, "one")]),
+        progress_callback=progress,
+    ).enumerate(source)
+
+    assert report.scan_status == "completed"
+    assert len(report.objects) == 1
+
 
 
