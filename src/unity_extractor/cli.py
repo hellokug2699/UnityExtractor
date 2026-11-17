@@ -19,6 +19,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", help="Write the report to this file instead of stdout")
     parser.add_argument("--enumerate-objects", action="store_true", help="Enumerate Unity objects using the optional UnityPy backend")
     parser.add_argument("--analyze-references", action="store_true", help="Parse serialized object data and enumerate PPtr references (requires --enumerate-objects)")
+    parser.add_argument("--analyze-dependencies", action="store_true", help="Build a dependency graph from object references (requires --analyze-references)")
+    parser.add_argument("--dependency-root", help="Resource ID used to report its transitive dependency chain")
+    parser.add_argument("--dependency-depth", type=int, default=8, help="Maximum dependency-chain depth (default: 8)")
     parser.add_argument("--max-container-mb", type=int, default=512, help="Maximum size of one candidate container in MiB (default: 512)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
@@ -83,6 +86,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.analyze_references and not args.enumerate_objects:
         print("--analyze-references requires --enumerate-objects.", file=sys.stderr)
         return 2
+    if args.analyze_dependencies and not args.analyze_references:
+        print("--analyze-dependencies requires --analyze-references.", file=sys.stderr)
+        return 2
+    if args.dependency_root and not args.analyze_dependencies:
+        print("--dependency-root requires --analyze-dependencies.", file=sys.stderr)
+        return 2
+    if args.dependency_depth < 0:
+        print("--dependency-depth must be zero or greater.", file=sys.stderr)
+        return 2
     if args.max_container_mb < 1:
         print("--max-container-mb must be at least 1.", file=sys.stderr)
         return 2
@@ -99,6 +111,15 @@ def main(argv: list[str] | None = None) -> int:
             print(str(exc), file=sys.stderr)
             return 2
         report = enumerator.enumerate(args.input).to_dict()
+        if args.analyze_dependencies:
+            from .dependency_graph import build_dependency_graph
+
+            report["dependency_graph"] = build_dependency_graph(
+                report["objects"],
+                report["references"],
+                root_resource_id=args.dependency_root,
+                max_depth=args.dependency_depth,
+            )
         rendered = json.dumps(report, ensure_ascii=False, indent=2) if args.format == "json" else render_object_text(report)
     else:
         report = UnityScanner().scan(args.input).to_dict()
