@@ -141,3 +141,45 @@ def test_non_candidate_files_do_not_consume_container_budget(tmp_path):
     assert report.inspected_containers == 1
     assert len(report.objects) == 1
     assert not any("Total container byte limit reached" in warning for warning in report.warnings)
+
+
+
+class ReferenceBackend(FakeBackend):
+    def iter_references(self, obj):
+        if obj.path_id == 1:
+            yield 0, 2, "sharedassets0.assets", True
+            yield 4, 99, None, False
+
+
+def test_reference_analysis_records_resolved_and_unresolved_pointers(tmp_path):
+    source = tmp_path / "fixture.assets"
+    source.write_bytes(b"fixture")
+    backend = ReferenceBackend([FakeObject(1, "source"), FakeObject(2, "target")])
+
+    report = UnityObjectEnumerator(backend=backend, include_references=True).enumerate(source)
+
+    assert len(report.objects) == 2
+    assert len(report.references) == 2
+    resolved, unresolved = report.references
+    assert resolved.source_resource_id == report.objects[0].resource_id
+    assert resolved.target_resource_id == report.objects[1].resource_id
+    assert resolved.target_path_id == 2
+    assert resolved.file_id == 0
+    assert resolved.resolved is True
+    assert unresolved.target_resource_id is None
+    assert unresolved.target_path_id == 99
+    assert unresolved.file_id == 4
+    assert unresolved.resolved is False
+
+
+def test_reference_analysis_without_backend_support_is_a_warning(tmp_path):
+    source = tmp_path / "fixture.assets"
+    source.write_bytes(b"fixture")
+    report = UnityObjectEnumerator(
+        backend=FakeBackend([FakeObject(1, "source")]),
+        include_references=True,
+    ).enumerate(source)
+
+    assert len(report.objects) == 1
+    assert report.references == []
+    assert any("not supported by the selected parser backend" in item for item in report.warnings)
