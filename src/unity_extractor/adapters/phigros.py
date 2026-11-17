@@ -425,8 +425,12 @@ class PhigrosAdapter:
                 "unmatched_assets": [],
                 "diagnostics": [],
             })
-            bundle_ids = bundle_ids_by_key.get(entry.get("dependency_key", ""), set())
+            dependency_key = entry.get("dependency_key", "")
+            bundle_ids = bundle_ids_by_key.get(dependency_key, set())
             bundle_bases = {_basename(value) for value in bundle_ids}
+            dependency_base = _basename(dependency_key)
+            if dependency_base.endswith(".bundle"):
+                bundle_bases.add(dependency_base)
             # Keep compatibility with catalogs where the track location itself
             # directly names the bundle.
             direct_base = _basename(entry["internal_id"])
