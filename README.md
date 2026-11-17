@@ -36,8 +36,11 @@ Inputs currently supported:
 - Addressables catalog filename candidates;
 - StreamingAssets path candidates;
 - Mono and IL2CPP runtime clues;
+- conservative Cocos2d-x runtime fingerprinting for non-Unity identification;
 - Unity version strings when found in inspected data;
 - confidence, warnings, and per-input errors.
+
+Cocos2d-x detection currently recognizes the `libcocos2dcpp.so` runtime filename; it is a narrow identification aid, not a general multi-engine parser. Conflicting strong Unity and Cocos2d-x fingerprints remain `unknown` rather than being guessed.
 
 A missing clue is **not** proof that a feature is absent. Encrypted, obfuscated, custom-packed, or unusually structured games may not be recognized. Version and backend detection are heuristic and are reported as unknown when evidence is insufficient.
 
