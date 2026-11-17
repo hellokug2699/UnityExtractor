@@ -2,7 +2,7 @@
 
 面向 Unity 游戏的证据驱动扫描与通用资源检查工具。项目采用模块化设计，将 Unity 容器解析与具体游戏的数据解释分离。
 
-> 当前状态：**P0 已完成，P1 对象枚举开发中**。P0 可扫描 APK、ZIP、目录和独立文件；P1 通过可选 UnityPy 后端枚举 SerializedFile / AssetBundle 中的对象。当前尚不导出资源文件。
+> 当前状态：**P0 已完成，P1 对象枚举已通过真实 APK 验证，P1.1 引用关系分析首轮实现中**。项目通过可选 UnityPy 后端枚举 SerializedFile / AssetBundle 对象，并可选择分析序列化对象引用；当前尚不导出资源文件。
 
 ## 环境要求
 
@@ -56,13 +56,14 @@ python -m unity_extractor /path/to/resource.bundle --output scan-report.json
 
 缺少某项证据不代表对应功能一定不存在。加密、混淆、自定义封装或特殊目录布局可能导致扫描器无法识别。版本和脚本后端判断均为启发式，证据不足时会保留为 unknown。
 
-## P1：对象枚举（开发中）
+## P1：对象枚举（已完成首轮验收）
 
 安装 UnityPy 后：
 
 ```bash
 unity-extractor /path/to/game.apk --enumerate-objects --format json --output objects.json
 unity-extractor /path/to/game.bundle --enumerate-objects
+unity-extractor /path/to/game.apk --enumerate-objects --analyze-references --format json --output references.json
 ```
 
 也可以扫描解包后的游戏目录。默认单个候选容器最大为 512 MiB，可通过 `--max-container-mb` 调整。
@@ -71,7 +72,15 @@ P1 当前输出对象类型、名称（可读取时）、Path ID、字节大小�
 
 APK / ZIP 输入只会选择具有 Unity Bundle 或 SerializedFile 头部特征的成员，使用随机临时文件交给解析后端，并在处理后清理；不会按压缩包内路径直接写入文件系统。P1 仍有单容器、总容器字节数、容器数量和对象数量限制。
 
-**P1 目前属于首轮实现，尚未完成真实游戏对象枚举验收。** UnityPy 解析失败或不支持的格式会记录错误，不会被宣称为已解析。
+Phigros APK 的真实样本已成功枚举 7,804 个对象，处理 2,683 个容器，第二版报告为 0 warnings / 0 errors。该结果验证的是对象元数据枚举，不代表资源 payload 已解码或导出。
+
+## P1.1：对象引用关系（首轮实现）
+
+使用 `--analyze-references` 可额外解析对象的序列化 TypeTree，提取其中的 Unity `PPtr` 引用。输出报告新增顶层 `references` 数组，记录来源对象、目标对象（可解析时）、目标 Path ID、File ID 和解析状态。无法解析的指针仍保留原始 File ID / Path ID，不会伪造目标对象。
+
+引用分析会读取对象的结构化序列化数据，但不会执行游戏代码，也不会导出或转换纹理、音频、网格等资源。单对象遍历设有节点数和深度上限；某个对象解析失败时记录 warning 并继续处理其他对象。UnityPy 不支持的 TypeTree、缺失的外部文件或无法解析的 PPtr 都可能产生未解析引用。
+
+P1.1 当前为首轮实现，尚需在真实 APK 上验证引用数量、解析率和跨 SerializedFile 引用行为。
 
 ## 安全与限制
 
