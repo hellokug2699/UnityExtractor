@@ -3,14 +3,41 @@ from __future__ import annotations
 
 import hashlib
 import json
+import platform
 import re
+import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 from .object_models import ObjectRecord
 
 MAX_IMAGE_PIXELS = 100_000_000
 HASH_CHUNK_SIZE = 1024 * 1024
+
+
+def _prepare_unitypy_export_import() -> None:
+    """Keep UnityPy image exporters usable when FMOD is unavailable on Android.
+
+    UnityPy eagerly imports every exporter from UnityPy.export. Its audio
+    converter imports fmod_toolkit at module load time, which currently aborts
+    on Android even when the caller only needs image conversion. A narrow
+    placeholder lets non-audio exporters load; unsupported FMOD conversion
+    still fails explicitly if it is ever requested.
+    """
+    if platform.system() != "Android" or "fmod_toolkit" in sys.modules:
+        return
+
+    fmod_stub = ModuleType("fmod_toolkit")
+
+    def _unsupported_audio_conversion(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError(
+            "FMOD audio conversion is unavailable on Android; "
+            "image and non-FMOD audio exports remain available."
+        )
+
+    fmod_stub.raw_to_wav = _unsupported_audio_conversion  # type: ignore[attr-defined]
+    sys.modules["fmod_toolkit"] = fmod_stub
 
 
 def _safe_stem(value: str | None) -> str:
@@ -107,6 +134,7 @@ class ResourceExporter:
     def _export_image(
         self, parsed: Any, record: ObjectRecord, entry: dict[str, Any]
     ) -> None:
+        _prepare_unitypy_export_import()
         image = getattr(parsed, "image")
         size = getattr(image, "size", None)
         if (
