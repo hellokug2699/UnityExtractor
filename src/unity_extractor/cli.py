@@ -76,6 +76,16 @@ def render_object_text(report: dict) -> str:
             lines.append(f"      Asset path: {obj['container_path']}")
         if obj["warnings"]:
             lines.extend(f"      Warning: {warning}" for warning in obj["warnings"])
+    export = report.get("resource_export")
+    if export:
+        lines.extend([
+            "",
+            "Resource export:",
+            f"  Supported types: {', '.join(export['supported_types'])}",
+            f"  Exported objects: {export['exported_object_count']}",
+            f"  Failed objects: {export['failed_object_count']}",
+            f"  Manifest: {export['manifest_path']}",
+        ])
     graph = report.get("dependency_graph")
     if graph:
         summary = graph["summary"]
@@ -178,7 +188,9 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     else:
         print(rendered)
-    return 0 if report["scan_status"] == "completed" else 1
+    export = report.get("resource_export")
+    export_failed = bool(export and export.get("failed_object_count", 0))
+    return 0 if report["scan_status"] == "completed" and not export_failed else 1
 
 
 if __name__ == "__main__":
