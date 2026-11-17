@@ -74,7 +74,7 @@ def render_object_text(report: dict) -> str:
         lines.extend(["", "Warnings:", *[f"  - {item}" for item in report["warnings"]]])
     if report["errors"]:
         lines.extend(["", "Errors:", *[f"  - {item}" for item in report["errors"]]])
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
