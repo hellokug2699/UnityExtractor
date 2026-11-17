@@ -132,16 +132,19 @@ class UnityObjectEnumerator:
                 if info.file_size > self.max_container_bytes:
                     report.warnings.append(f"Skipped oversized archive member: {logical_name}")
                     continue
-                if info.compress_size and info.file_size / info.compress_size > MAX_COMPRESSION_RATIO:
-                    report.warnings.append(f"Skipped suspicious compression ratio: {logical_name}")
-                    continue
                 if total_bytes + info.file_size > self.max_total_bytes:
                     report.warnings.append("Total container byte limit reached; remaining archive members were not inspected.")
                     return
                 try:
+                    # Read only a tiny prefix before applying the compression-ratio
+                    # guard, so unrelated highly-compressible APK entries do not
+                    # create misleading warnings.
                     with archive.open(info) as stream:
                         prefix = stream.read(32)
                     if not _is_candidate(prefix):
+                        continue
+                    if info.compress_size and info.file_size / info.compress_size > MAX_COMPRESSION_RATIO:
+                        report.warnings.append(f"Skipped suspicious compression ratio: {logical_name}")
                         continue
                     total_bytes += info.file_size
                     self._enumerate_archive_member(archive_path, info, logical_name, report)
@@ -207,11 +210,11 @@ class UnityObjectEnumerator:
 
         assets_file = _safe_attr(obj, "assets_file")
         asset_name = _safe_attr(assets_file, "name") or "unknown-serialized-file"
-        parent = _safe_attr(assets_file, "parent")
-        parent_name = _safe_attr(parent, "name")
-        container_id = "/".join(str(part) for part in (parent_name, asset_name) if part)
-        if not container_id:
-            container_id = logical_source_id
+        # UnityPy's parent.name can be the random temporary filename used
+        # when staging an APK member. It is not stable across runs. The
+        # serialized-file name is the stable inner-container identifier;
+        # logical_source_id already distinguishes different outer APK members.
+        container_id = str(asset_name) if asset_name else logical_source_id
 
         obj_type = _safe_attr(obj, "type")
         type_name = _safe_attr(obj_type, "name") or str(obj_type or "unknown")
