@@ -23,6 +23,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dependency-root", help="Resource ID used to report its transitive dependency chain")
     parser.add_argument("--dependency-depth", type=int, default=8, help="Maximum dependency-chain depth (default: 8)")
     parser.add_argument("--max-container-mb", type=int, default=512, help="Maximum size of one candidate container in MiB (default: 512)")
+    parser.add_argument("--export-resources", action="store_true", help="Export supported Unity resources while enumerating objects")
+    parser.add_argument("--export-dir", help="Directory for exported resources and export-manifest.json (requires --export-resources)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
@@ -105,6 +107,15 @@ def render_object_text(report: dict) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.export_resources and not args.enumerate_objects:
+        print("--export-resources requires --enumerate-objects.", file=sys.stderr)
+        return 2
+    if args.export_resources and not args.export_dir:
+        print("--export-resources requires --export-dir.", file=sys.stderr)
+        return 2
+    if args.export_dir and not args.export_resources:
+        print("--export-dir requires --export-resources.", file=sys.stderr)
+        return 2
     if args.analyze_references and not args.enumerate_objects:
         print("--analyze-references requires --enumerate-objects.", file=sys.stderr)
         return 2
@@ -124,15 +135,27 @@ def main(argv: list[str] | None = None) -> int:
     if args.enumerate_objects:
         from .enumerator import UnityObjectEnumerator
 
+        exporter = None
+        if args.export_resources:
+            from .resource_exporter import ResourceExporter
+            exporter = ResourceExporter(args.export_dir)
         try:
             enumerator = UnityObjectEnumerator(
                 max_container_bytes=args.max_container_mb * 1024 * 1024,
-                include_references=args.analyze_references
+                include_references=args.analyze_references,
+                object_callback=exporter,
             )
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
             return 2
         report = enumerator.enumerate(args.input).to_dict()
+        if exporter is not None:
+            try:
+                manifest_path = exporter.write_manifest()
+                report["resource_export"] = exporter.summary() | {"manifest_path": str(manifest_path)}
+            except OSError as exc:
+                report.setdefault("errors", []).append(f"Could not write export manifest: {exc}")
+                report["scan_status"] = "partial" if report.get("objects") else "failed"
         if args.analyze_dependencies:
             from .dependency_graph import build_dependency_graph
 
