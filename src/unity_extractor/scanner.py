@@ -154,7 +154,7 @@ class UnityScanner:
             self._add(report, "il2cpp_metadata", "IL2CPP global metadata filename found.", name, "supporting")
         if base == "libil2cpp.so" or base == "gameassembly.dll":
             self._add(report, "il2cpp_runtime", f"IL2CPP runtime binary: {name}", name, "strong")
-        if base == "mono" or "/managed/" in f"/{normalized}/" or base.endswith(".dll") and "/data/managed/" in f"/{normalized}/":
+        if base == "mono" or (base.endswith(".dll") and "/managed/" in f"/{normalized}/" and base != "global-metadata.dat"):
             self._add(report, "mono_managed", f"Mono/Managed directory or assembly candidate: {name}", name, "supporting")
         if "streamingassets" in normalized:
             self._add(report, "streaming_assets", f"StreamingAssets path candidate: {name}", name, "supporting")
