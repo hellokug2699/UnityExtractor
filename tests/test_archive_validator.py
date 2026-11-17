@@ -40,7 +40,7 @@ def test_archive_verification_passes_and_streams_manifest_files(tmp_path):
 
 
 def test_archive_verification_detects_corrupted_payload(tmp_path):
-    archive, manifest = _make_fixture(tmp_path, payload=b"expected", archive_payload=b"corrupted")
+    archive, manifest = _make_fixture(tmp_path, payload=b"expected", archive_payload=b"corrupt!")
     result = verify_export_archive(archive, manifest)
     assert result["status"] == "failed"
     assert any("SHA-256" in error for error in result["errors"])
