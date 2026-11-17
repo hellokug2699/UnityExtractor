@@ -98,6 +98,9 @@ def render_object_text(report: dict) -> str:
             f"  Matched internal IDs: {summary['matched_internal_id_count']}",
             f"  Unresolved internal IDs: {summary['unresolved_internal_id_count']}",
             f"  Key mapping: {summary['key_mapping_status']}",
+            f"  Key-to-location rows: {summary['key_entry_count']}",
+            f"  Matched key rows: {summary['matched_key_entry_count']}",
+            f"  Unresolved key rows: {summary['unresolved_key_entry_count']}",
         ])
     graph = report.get("dependency_graph")
     if graph:

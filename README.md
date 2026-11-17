@@ -142,12 +142,14 @@ P2.3 已加入 `AudioClip` 样本导出，写入 `audio/`。样本保持后端�
 unity-extractor /path/to/game.apk --enumerate-objects --format json --output objects.json
 ```
 
-报告的 `addressables` 字段包含：
+JSON catalog 的 `m_KeyDataString`、`m_BucketDataString` 和 `m_EntryDataString` 会按 Addressables 1.16+ JSON 格式解码，得到 key → internal ID / Provider / 主 key / 依赖 key 的映射。报告中的 `addressables` 字段包含：
 
-- `catalogs`：候选路径、校验状态、locator ID、构建哈希、内部 ID 与 Provider 数量、运行时路径占位符、key 映射状态和 warning；
-- `summary`：候选数、已验证数、内部 ID 总数、按文件名匹配到的容器数、未解析数及未解析样例。
+- `catalogs`：候选路径、校验状态、locator ID、构建哈希、内部 ID 与 Provider 数量、运行时路径占位符、key 映射状态、key/location 数量、key 映射样例、匹配数与 warning；
+- `summary`：候选数、已验证数、内部 ID 总数及其匹配/未解析数、key 映射状态、key 行总数及匹配/未解析数与样例。
 
-内部 ID 仅按文件名与本次实际发现的容器匹配，不会伪造不存在的依赖。未匹配项保留在 `unresolved_internal_id_samples` 中。二进制 catalog 暂不解析；`m_KeyDataString` / bucket / entry 映射尚未解码，统一标记为 `unsupported`，不会根据 key 猜测资源关系。单个 catalog 上限 8 MiB，最多 16 个，合计 32 MiB。传统 AssetBundle 和独立 SerializedFile 仍按原有路径发现，Addressables 不是必需布局。
+内部 ID 和 key 行仅按文件名与本次实际发现的容器匹配，不会伪造不存在的依赖。未匹配项保留在 `unresolved_*` 字段中。JSON Object 类型的 key 不会被实例化，只计入 `unsupported_key_type_count`。二进制 catalog 仍标记为 `unsupported_binary`，不做猜测。单个 catalog 上限 8 MiB，最多 16 个，合计 32 MiB；key 行上限 200,000。
+
+嵌套压缩包会按 ZIP 头部识别并递归检查，最大嵌套深度为 2。APK / ZIP 或目录中的 `StreamingAssets` 内层 ZIP 只要包含 Unity Bundle、SerializedFile 或 Addressables catalog 就会被继续枚举，来源路径保留为 `outer.apk!/inner.zip!/assets/x.bundle`。嵌套成员与普通候选容器共享总字节预算，并受单容器大小、压缩比、容器数量和临时文件清理限制。传统 AssetBundle 和独立 SerializedFile 仍按原有路径发现，Addressables 不是必需布局。
 
 ## 安全与限制
 

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import io
 import json
+import struct
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -188,12 +191,31 @@ def test_reference_analysis_without_backend_support_is_a_warning(tmp_path):
 
 
 def make_catalog(internal_ids: list[str], *, locator: str = "MainCatalog") -> bytes:
-    return json.dumps({
+    keys = [f"key-{index}" for index in range(len(internal_ids))]
+    key_data = struct.pack("<i", len(keys))
+    key_offsets = []
+    for key in keys:
+        key_offsets.append(len(key_data))
+        raw = key.encode("ascii")
+        key_data += b"\x00" + struct.pack("<i", len(raw)) + raw
+
+    bucket_data = struct.pack("<i", len(keys))
+    for index, key_offset in enumerate(key_offsets):
+        bucket_data += struct.pack("<iii", key_offset, 1, index)
+
+    entry_data = struct.pack("<i", len(internal_ids))
+    for index in range(len(internal_ids)):
+        entry_data += struct.pack("<7i", index, 0, -1, 0, -1, index, 0)
+
+    payload = {
         "m_LocatorId": locator,
         "m_InternalIds": internal_ids,
         "m_ProviderIds": ["AssetBundleProvider"],
-        "m_KeyDataString": "AQAAAA==",
-    }).encode("utf-8")
+        "m_KeyDataString": base64.b64encode(key_data).decode("ascii"),
+        "m_BucketDataString": base64.b64encode(bucket_data).decode("ascii"),
+        "m_EntryDataString": base64.b64encode(entry_data).decode("ascii"),
+    }
+    return json.dumps(payload).encode("utf-8")
 
 
 def test_apk_catalog_is_inspected_alongside_unity_containers(tmp_path):
@@ -219,7 +241,9 @@ def test_apk_catalog_is_inspected_alongside_unity_containers(tmp_path):
     assert summary["internal_id_count"] == 1
     assert summary["matched_internal_id_count"] == 1
     assert summary["unresolved_internal_id_count"] == 0
-    assert summary["key_mapping_status"] == "unsupported"
+    assert summary["key_mapping_status"] == "decoded"
+    assert summary["key_entry_count"] == 1
+    assert summary["matched_key_entry_count"] == 1
     assert report.to_dict()["addressables"] == report.addressables
 
 
@@ -306,3 +330,104 @@ def test_object_callback_runs_before_staged_apk_member_is_removed(tmp_path):
     assert report.scan_status == "completed"
     assert callback_observations == [(88, report.objects[0].resource_id, True)]
     assert not backend.loaded_paths[0].exists()
+
+
+def zip_bytes(entries: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, payload in entries.items():
+            archive.writestr(name, payload)
+    return buffer.getvalue()
+
+
+def test_nested_archive_members_and_catalogs_are_enumerated(tmp_path):
+    inner = zip_bytes({
+        "catalog.json": make_catalog([
+            "{UnityEngine.AddressableAssets.Addressables.RuntimePath}/level.bundle"
+        ]),
+        "level.bundle": b"UnityFS" + b"\0" * 64,
+    })
+    apk = tmp_path / "game.apk"
+    with zipfile.ZipFile(apk, "w") as archive:
+        archive.writestr("assets/StreamingAssets/aa.zip", inner)
+
+    backend = FakeBackend([FakeObject(90, "nested")])
+    report = UnityObjectEnumerator(backend=backend).enumerate(apk)
+
+    assert report.scan_status == "completed"
+    assert report.inspected_containers == 1
+    assert len(report.objects) == 1
+    assert report.objects[0].source_id.endswith(
+        "!/assets/StreamingAssets/aa.zip!/level.bundle"
+    )
+    summary = report.addressables["summary"]
+    assert summary["validated_catalog_count"] == 1
+    assert summary["matched_internal_id_count"] == 1
+    assert summary["key_mapping_status"] == "decoded"
+    assert not backend.loaded_paths[0].exists()
+
+
+def test_directory_nested_archive_is_enumerated(tmp_path):
+    root = tmp_path / "game"
+    (root / "assets").mkdir(parents=True)
+    (root / "assets" / "aa.zip").write_bytes(
+        zip_bytes({"level.bundle": b"UnityFS" + b"\0" * 64})
+    )
+    backend = FakeBackend([FakeObject(91, "nested")])
+
+    report = UnityObjectEnumerator(backend=backend).enumerate(root)
+
+    assert report.inspected_containers == 1
+    assert report.objects[0].source_id.endswith("!/assets/aa.zip!/level.bundle")
+
+
+def test_nested_archive_depth_limit_is_reported(tmp_path):
+    level_three = zip_bytes({"level.bundle": b"UnityFS" + b"\0" * 64})
+    level_two = zip_bytes({"level3.zip": level_three})
+    level_one = zip_bytes({"level2.zip": level_two})
+    apk = tmp_path / "game.apk"
+    with zipfile.ZipFile(apk, "w") as archive:
+        archive.writestr("level1.zip", level_one)
+
+    report = UnityObjectEnumerator(backend=FakeBackend([])).enumerate(apk)
+
+    assert report.objects == []
+    assert any(
+        "Nested archive depth limit reached" in warning for warning in report.warnings
+    )
+
+
+def test_malformed_nested_archive_does_not_stop_outer_enumeration(tmp_path):
+    apk = tmp_path / "game.apk"
+    with zipfile.ZipFile(apk, "w") as archive:
+        archive.writestr("assets/broken.zip", b"PK\x03\x04not-a-zip")
+        archive.writestr("assets/level.bundle", b"UnityFS" + b"\0" * 64)
+
+    report = UnityObjectEnumerator(
+        backend=FakeBackend([FakeObject(92, "level")])
+    ).enumerate(apk)
+
+    assert len(report.objects) == 1
+    assert any(
+        "nested archive could not be inspected" in warning
+        for warning in report.warnings
+    )
+
+
+def test_nested_archives_share_the_total_byte_budget(tmp_path):
+    inner = zip_bytes({"level.bundle": b"UnityFS" + b"\0" * 64})
+    apk = tmp_path / "game.apk"
+    with zipfile.ZipFile(apk, "w") as archive:
+        archive.writestr("assets/aa.zip", inner)
+
+    report = UnityObjectEnumerator(
+        backend=FakeBackend([FakeObject(93, "level")]),
+        max_total_bytes=8,
+    ).enumerate(apk)
+
+    assert report.objects == []
+    assert any(
+        "Total container byte limit reached" in warning
+        for warning in report.warnings
+    )
+
