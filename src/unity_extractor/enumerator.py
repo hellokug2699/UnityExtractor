@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .backends.unitypy import UnityPyBackend
-from .object_models import EnumerationReport, ObjectRecord
+from .object_models import EnumerationReport, ObjectRecord, ObjectReference
 from .scanner import BUNDLE_MAGICS, _looks_like_serialized_header
 
 MAX_CONTAINERS = 20_000
@@ -49,11 +49,13 @@ class UnityObjectEnumerator:
         max_container_bytes: int = MAX_CONTAINER_BYTES,
         max_total_bytes: int = MAX_TOTAL_CONTAINER_BYTES,
         max_objects: int = MAX_OBJECTS,
+        include_references: bool = False,
     ) -> None:
         self.backend = backend or UnityPyBackend()
         self.max_container_bytes = max_container_bytes
         self.max_total_bytes = max_total_bytes
         self.max_objects = max_objects
+        self.include_references = include_references
 
     def enumerate(self, input_path: str | os.PathLike[str]) -> EnumerationReport:
         path = Path(input_path).expanduser()
@@ -195,17 +197,19 @@ class UnityObjectEnumerator:
                 if len(report.objects) >= self.max_objects:
                     report.warnings.append(f"Object limit reached ({self.max_objects}).")
                     return
-                self._append_object(obj, logical_source_id, report)
+                record = self._append_object(obj, logical_source_id, report)
+                if record is not None and self.include_references:
+                    self._append_references(obj, record, logical_source_id, report)
         except Exception as exc:
             report.errors.append(f"{logical_source_id}: object iteration failed: {type(exc).__name__}: {exc}")
 
-    def _append_object(self, obj: Any, logical_source_id: str, report: EnumerationReport) -> None:
+    def _append_object(self, obj: Any, logical_source_id: str, report: EnumerationReport) -> ObjectRecord | None:
         path_id = _safe_attr(obj, "path_id")
         try:
             path_id = int(path_id)
         except (TypeError, ValueError):
             report.errors.append(f"{logical_source_id}: skipped object without a valid Path ID.")
-            return
+            return None
 
         assets_file = _safe_attr(obj, "assets_file")
         asset_name = _safe_attr(assets_file, "name") or "unknown-serialized-file"
@@ -246,19 +250,54 @@ class UnityObjectEnumerator:
             "unity_version": _safe_attr(assets_file, "unity_version"),
         }
         metadata = {key: value for key, value in metadata.items() if isinstance(value, (str, int, float, bool)) or value is None}
-        report.objects.append(
-            ObjectRecord(
-                resource_id=_identity(logical_source_id, container_id, path_id),
-                source_id=logical_source_id,
-                container_id=container_id,
-                path_id=path_id,
-                type_name=str(type_name),
-                name=name,
-                size_bytes=size_bytes,
-                container_path=container_path,
-                metadata=metadata,
-                warnings=warnings,
-            )
+        record = ObjectRecord(
+            resource_id=_identity(logical_source_id, container_id, path_id),
+            source_id=logical_source_id,
+            container_id=container_id,
+            path_id=path_id,
+            type_name=str(type_name),
+            name=name,
+            size_bytes=size_bytes,
+            container_path=container_path,
+            metadata=metadata,
+            warnings=warnings,
         )
+        report.objects.append(record)
         if warnings:
             report.warnings.extend(f"{logical_source_id} / Path ID {path_id}: {warning}" for warning in warnings)
+        return record
+
+    def _append_references(
+        self,
+        obj: Any,
+        source_record: ObjectRecord,
+        logical_source_id: str,
+        report: EnumerationReport,
+    ) -> None:
+        iterator = getattr(self.backend, "iter_references", None)
+        if not callable(iterator):
+            warning = "Reference analysis is not supported by the selected parser backend."
+            source_record.warnings.append(warning)
+            report.warnings.append(f"{logical_source_id} / Path ID {source_record.path_id}: {warning}")
+            return
+        try:
+            for file_id, target_path_id, target_container_id, resolved in iterator(obj):
+                target_id = (
+                    _identity(logical_source_id, target_container_id, int(target_path_id))
+                    if resolved and target_container_id
+                    else None
+                )
+                report.references.append(
+                    ObjectReference(
+                        source_resource_id=source_record.resource_id,
+                        target_resource_id=target_id,
+                        target_container_id=target_container_id,
+                        target_path_id=int(target_path_id),
+                        file_id=int(file_id),
+                        resolved=bool(resolved and target_id),
+                    )
+                )
+        except Exception as exc:
+            warning = f"Reference parsing failed: {type(exc).__name__}: {exc}"
+            source_record.warnings.append(warning)
+            report.warnings.append(f"{logical_source_id} / Path ID {source_record.path_id}: {warning}")
