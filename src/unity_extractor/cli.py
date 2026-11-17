@@ -17,6 +17,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("input", help="Path to a game directory, APK, ZIP, or resource file")
     parser.add_argument("--format", choices=("text", "json"), default="text", help="Report format")
     parser.add_argument("--output", help="Write the report to this file instead of stdout")
+    parser.add_argument("--enumerate-objects", action="store_true", help="Enumerate Unity objects using the optional UnityPy backend")
+    parser.add_argument("--max-container-mb", type=int, default=512, help="Maximum size of one candidate container in MiB (default: 512)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
@@ -48,10 +50,54 @@ def render_text(report: dict) -> str:
     return "\n".join(lines)
 
 
+def render_object_text(report: dict) -> str:
+    lines = [
+        f"Input: {report['input_path']}",
+        f"Status: {report['scan_status']}",
+        f"Parser: {report['parser_name']} ({report['parser_version'] or 'version unknown'})",
+        f"Inspected containers: {report['inspected_containers']}",
+        f"Objects: {len(report['objects'])}",
+        "",
+        "Objects:",
+    ]
+    for obj in report["objects"]:
+        lines.append(
+            f"  - {obj['type_name']} | {obj['name'] or '<unnamed>'} | "
+            f"Path ID: {obj['path_id']} | Size: {obj['size_bytes'] if obj['size_bytes'] is not None else 'unknown'}"
+        )
+        lines.append(f"      Container: {obj['container_id']}")
+        if obj["container_path"]:
+            lines.append(f"      Asset path: {obj['container_path']}")
+        if obj["warnings"]:
+            lines.extend(f"      Warning: {warning}" for warning in obj["warnings"])
+    if report["warnings"]:
+        lines.extend(["", "Warnings:", *[f"  - {item}" for item in report["warnings"]]])
+    if report["errors"]:
+        lines.extend(["", "Errors:", *[f"  - {item}" for item in report["errors"]]])
+    return "\\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    report = UnityScanner().scan(args.input).to_dict()
-    rendered = json.dumps(report, ensure_ascii=False, indent=2) if args.format == "json" else render_text(report)
+    if args.max_container_mb < 1:
+        print("--max-container-mb must be at least 1.", file=sys.stderr)
+        return 2
+
+    if args.enumerate_objects:
+        from .enumerator import UnityObjectEnumerator
+
+        try:
+            enumerator = UnityObjectEnumerator(
+                max_container_bytes=args.max_container_mb * 1024 * 1024
+            )
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        report = enumerator.enumerate(args.input).to_dict()
+        rendered = json.dumps(report, ensure_ascii=False, indent=2) if args.format == "json" else render_object_text(report)
+    else:
+        report = UnityScanner().scan(args.input).to_dict()
+        rendered = json.dumps(report, ensure_ascii=False, indent=2) if args.format == "json" else render_text(report)
     if args.output:
         try:
             with open(args.output, "w", encoding="utf-8") as stream:
