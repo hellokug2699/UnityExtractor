@@ -183,3 +183,25 @@ def test_reference_analysis_without_backend_support_is_a_warning(tmp_path):
     assert len(report.objects) == 1
     assert report.references == []
     assert any("not supported by the selected parser backend" in item for item in report.warnings)
+
+
+
+def test_object_callback_runs_before_staged_apk_member_is_removed(tmp_path):
+    apk = tmp_path / "game.apk"
+    with zipfile.ZipFile(apk, "w") as archive:
+        archive.writestr("assets/data.bundle", b"UnityFS" + b"\\0" * 64)
+
+    backend = FakeBackend([FakeObject(88, "chart")])
+    callback_observations = []
+
+    def callback(obj, record):
+        callback_observations.append((obj.path_id, record.resource_id, backend.loaded_paths[-1].exists()))
+
+    report = UnityObjectEnumerator(
+        backend=backend,
+        object_callback=callback,
+    ).enumerate(apk)
+
+    assert report.scan_status == "completed"
+    assert callback_observations == [(88, report.objects[0].resource_id, True)]
+    assert not backend.loaded_paths[0].exists()
