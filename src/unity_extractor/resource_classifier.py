@@ -50,6 +50,17 @@ _TYPE_GROUPS: dict[str, tuple[str, str]] = {
     "VideoClip": ("video", "clip"),
     "AssetBundle": ("container", "asset_bundle"),
     "ResourceManager": ("container", "resource_manager"),
+    # Unity UI and rendering components are scene structure, not image payloads.
+    "Canvas": ("scene", "canvas"),
+    "CanvasRenderer": ("scene", "canvas_renderer"),
+    "CanvasGroup": ("scene", "canvas_group"),
+    "SpriteRenderer": ("scene", "sprite_renderer"),
+    # AudioSource describes playback configuration; AudioClip is the audio asset.
+    "AudioSource": ("audio", "source"),
+    # Particle systems are scene components that describe runtime effects.
+    "ParticleSystem": ("scene", "particle_system"),
+    "ParticleSystemRenderer": ("scene", "particle_system_renderer"),
+    "ParticleSystemForceField": ("scene", "particle_system_force_field"),
 }
 
 
