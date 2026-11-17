@@ -145,7 +145,8 @@ class UnityObjectEnumerator:
                         continue
                     total_bytes += info.file_size
                     self._enumerate_archive_member(archive_path, info, logical_name, report)
-                except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+                except Exception as exc:
+                    # Isolate malformed members and parser failures; keep scanning siblings.
                     report.errors.append(f"{logical_name}: {type(exc).__name__}: {exc}")
 
     def _enumerate_archive_member(
