@@ -150,6 +150,10 @@ class UnityScanner:
             self._add(report, "unity_data_file", f"Unity data filename: {name}", name, "strong")
         if base in {"unityplayer.dll", "libunity.so", "libunity.dylib"}:
             self._add(report, "unity_runtime", f"Unity runtime library: {name}", name, "strong")
+        # This is a runtime-library fingerprint, not proof that every game
+        # component uses Cocos2d-x. Keep it as engine evidence only.
+        if base == "libcocos2dcpp.so":
+            self._add(report, "cocos2d_x_runtime", f"Cocos2d-x runtime library: {name}", name, "strong")
         if base == "global-metadata.dat":
             self._add(report, "il2cpp_metadata", "IL2CPP global metadata filename found.", name, "supporting")
         if base == "libil2cpp.so" or base == "gameassembly.dll":
@@ -189,9 +193,19 @@ class UnityScanner:
         codes = {item.code for item in report.evidence}
         strong_unity = {"unity_data_file", "unity_runtime", "asset_bundle"}
         unity_hits = codes & strong_unity
-        if unity_hits:
+        cocos_hits = codes & {"cocos2d_x_runtime"}
+        if unity_hits and cocos_hits:
+            # Mixed fingerprints can occur in wrappers or multi-engine packages.
+            # Do not silently choose one engine when both have strong evidence.
+            report.engine_name = "unknown"
+            report.engine_confidence = "unknown"
+            report.warnings.append("Strong Unity and Cocos2d-x fingerprints both found; engine remains unknown.")
+        elif unity_hits:
             report.engine_name = "Unity"
             report.engine_confidence = "high" if len(unity_hits) >= 2 or "asset_bundle" in unity_hits else "medium"
+        elif cocos_hits:
+            report.engine_name = "Cocos2d-x"
+            report.engine_confidence = "high"
         elif codes & {"serialized_file_candidate", "streaming_assets", "il2cpp_metadata"}:
             report.engine_name = "Unity"
             report.engine_confidence = "low"
@@ -243,6 +257,7 @@ class UnityScanner:
             "il2cpp_runtime": "il2cpp",
             "il2cpp_metadata": "il2cpp",
             "mono_managed": "mono",
+            "cocos2d_x_runtime": "other_engine_runtime",
         }
         return mapping.get(code)
 
