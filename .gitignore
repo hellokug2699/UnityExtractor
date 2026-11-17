@@ -11,3 +11,8 @@ htmlcov/
 .DS_Store
 .idea/
 .vscode/
+
+# 本地资源导出与归档文件
+unity-export/
+exports/
+*.zip
