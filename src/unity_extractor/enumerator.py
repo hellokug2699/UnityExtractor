@@ -104,16 +104,16 @@ class UnityObjectEnumerator:
                 source = Path(current) / name
                 try:
                     size = source.stat().st_size
-                    if size > self.max_container_bytes:
-                        report.warnings.append(f"Skipped oversized candidate: {source.relative_to(root).as_posix()}")
-                        continue
-                    if total_bytes + size > self.max_total_bytes:
-                        report.warnings.append("Total container byte limit reached; remaining files were not inspected.")
-                        return
                     with source.open("rb") as stream:
                         prefix = stream.read(32)
                     if not _is_candidate(prefix):
                         continue
+                    if size > self.max_container_bytes:
+                        report.warnings.append(f"Skipped oversized candidate: {source.relative_to(root).as_posix()}")
+                        continue
+                    if total_bytes + size > self.max_total_bytes:
+                        report.warnings.append("Total container byte limit reached; remaining candidate files were not inspected.")
+                        return
                     total_bytes += size
                     self._enumerate_file(source, f"{root.resolve()}!/{source.relative_to(root).as_posix()}", report)
                 except OSError as exc:
@@ -129,23 +129,22 @@ class UnityObjectEnumerator:
                     report.warnings.append(f"Container limit reached ({MAX_CONTAINERS}).")
                     return
                 logical_name = info.filename.replace("\\", "/")
-                if info.file_size > self.max_container_bytes:
-                    report.warnings.append(f"Skipped oversized archive member: {logical_name}")
-                    continue
-                if total_bytes + info.file_size > self.max_total_bytes:
-                    report.warnings.append("Total container byte limit reached; remaining archive members were not inspected.")
-                    return
                 try:
-                    # Read only a tiny prefix before applying the compression-ratio
-                    # guard, so unrelated highly-compressible APK entries do not
-                    # create misleading warnings.
+                    # Inspect only a tiny prefix before applying candidate limits,
+                    # so unrelated APK entries cannot consume the candidate budget.
                     with archive.open(info) as stream:
                         prefix = stream.read(32)
                     if not _is_candidate(prefix):
                         continue
+                    if info.file_size > self.max_container_bytes:
+                        report.warnings.append(f"Skipped oversized archive member: {logical_name}")
+                        continue
                     if info.compress_size and info.file_size / info.compress_size > MAX_COMPRESSION_RATIO:
                         report.warnings.append(f"Skipped suspicious compression ratio: {logical_name}")
                         continue
+                    if total_bytes + info.file_size > self.max_total_bytes:
+                        report.warnings.append("Total container byte limit reached; remaining candidate archive members were not inspected.")
+                        return
                     total_bytes += info.file_size
                     self._enumerate_archive_member(archive_path, info, logical_name, report)
                 except Exception as exc:
