@@ -406,9 +406,6 @@ class PhigrosAdapter:
             if not _basename(internal_id).endswith(".bundle"):
                 continue
             bundle_ids_by_key.setdefault(key, set()).add(internal_id)
-            primary_key = item.get("primary_key")
-            if isinstance(primary_key, str) and primary_key:
-                bundle_ids_by_key.setdefault(primary_key, set()).add(internal_id)
 
         songs: dict[str, dict[str, Any]] = {}
         matched = 0
