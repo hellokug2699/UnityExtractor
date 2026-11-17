@@ -6,7 +6,7 @@ import os
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable
 
 from .backends.unitypy import UnityPyBackend
 from .object_models import EnumerationReport, ObjectRecord
@@ -74,7 +74,11 @@ class UnityObjectEnumerator:
             elif path.is_file() and zipfile.is_zipfile(path):
                 self._enumerate_archive(path, report)
             elif path.is_file():
-                self._enumerate_file(path, path.name, report)
+                size = path.stat().st_size
+                if size > self.max_container_bytes:
+                    report.warnings.append(f"Skipped oversized standalone input ({size} bytes).")
+                else:
+                    self._enumerate_file(path, str(path.resolve()), report)
             else:
                 report.scan_status = "failed"
                 report.errors.append("Input is neither a regular file nor a directory.")
@@ -111,7 +115,7 @@ class UnityObjectEnumerator:
                     if not _is_candidate(prefix):
                         continue
                     total_bytes += size
-                    self._enumerate_file(source, source.relative_to(root).as_posix(), report)
+                    self._enumerate_file(source, f"{root.resolve()}!/{source.relative_to(root).as_posix()}", report)
                 except OSError as exc:
                     report.warnings.append(f"Could not inspect {source}: {exc}")
 
