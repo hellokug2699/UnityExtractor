@@ -175,11 +175,6 @@ class UnityScanner:
         if match:
             version = match.group(1).decode("ascii", errors="replace")
             self._add(report, "unity_version_string", f"Unity version string found: {version}", name, "strong", value=version)
-        lowered = data[:MAX_ENTRY_READ].lower()
-        if b"m_assemblyname" in lowered or b"assembly-csharp" in lowered:
-            self._add(report, "mono_metadata_clue", "Managed assembly metadata clue found.", name, "supporting")
-        if b"m_assemblyname" in lowered and b"il2cpp" in lowered:
-            self._add(report, "mixed_runtime_clues", "Conflicting or mixed runtime-related strings found.", name, "weak")
 
     @staticmethod
     def _add(report: ScanReport, code: str, description: str, source: str | None, strength: str, value: str | None = None) -> None:
@@ -214,7 +209,9 @@ class UnityScanner:
             report.warnings.append("Multiple Unity version strings found; version is left unknown.")
 
         has_il2cpp = "il2cpp_runtime" in codes or "il2cpp_metadata" in codes
-        has_mono = "mono_managed" in codes or "mono_metadata_clue" in codes
+        # Arbitrary linker XML may mention Assembly-CSharp in IL2CPP builds.
+        # Only actual managed assembly paths count as Mono evidence.
+        has_mono = "mono_managed" in codes
         if has_il2cpp and not has_mono:
             report.scripting_backend = "IL2CPP"
         elif has_mono and not has_il2cpp:
@@ -246,7 +243,6 @@ class UnityScanner:
             "il2cpp_runtime": "il2cpp",
             "il2cpp_metadata": "il2cpp",
             "mono_managed": "mono",
-            "mono_metadata_clue": "mono",
         }
         return mapping.get(code)
 
