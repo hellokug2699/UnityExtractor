@@ -66,3 +66,41 @@ def test_linker_xml_does_not_imply_mono(tmp_path):
     report = UnityScanner().scan(apk)
     assert report.scripting_backend == "IL2CPP"
     assert not any(f.kind == "mono" for f in report.findings)
+
+
+
+def test_detects_cocos2d_x_runtime_without_calling_it_unity(tmp_path):
+    apk = tmp_path / "cocos.apk"
+    with zipfile.ZipFile(apk, "w") as archive:
+        archive.writestr("lib/arm64-v8a/libcocos2dcpp.so", b"ELF")
+        archive.writestr("assets/game/data.bin", b"opaque game data")
+    report = UnityScanner().scan(apk)
+    assert report.engine_name == "Cocos2d-x"
+    assert report.engine_confidence == "high"
+    assert any(f.kind == "other_engine_runtime" for f in report.findings)
+    assert not any(f.kind == "unity_runtime" for f in report.findings)
+
+
+def test_conflicting_strong_engine_fingerprints_remain_unknown(tmp_path):
+    apk = tmp_path / "mixed.apk"
+    with zipfile.ZipFile(apk, "w") as archive:
+        archive.writestr("lib/arm64-v8a/libunity.so", b"ELF")
+        archive.writestr("lib/arm64-v8a/libcocos2dcpp.so", b"ELF")
+    report = UnityScanner().scan(apk)
+    assert report.engine_name == "unknown"
+    assert report.engine_confidence == "unknown"
+    assert any("both found" in warning for warning in report.warnings)
+
+
+def test_missing_input_is_reported_as_failed(tmp_path):
+    report = UnityScanner().scan(tmp_path / "does-not-exist.apk")
+    assert report.scan_status == "failed"
+    assert report.errors
+
+
+def test_directory_reports_oversized_files(tmp_path):
+    oversized = tmp_path / "large.bin"
+    oversized.write_bytes(b"x" * (2 * 1024 * 1024 + 1))
+    report = UnityScanner().scan(tmp_path)
+    assert report.scan_status == "completed"
+    assert any("Skipped oversized file" in warning for warning in report.warnings)
