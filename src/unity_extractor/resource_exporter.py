@@ -105,15 +105,36 @@ class ResourceExporter:
     samples are preserved in the format returned by the backend.
     """
 
-    def __init__(self, output_dir: str | Path) -> None:
+    def __init__(
+        self,
+        output_dir: str | Path,
+        destination_map: dict[str, str] | None = None,
+        selected_resource_ids: set[str] | None = None,
+    ) -> None:
         self.output_dir = Path(output_dir).expanduser()
+        self.destination_map = destination_map or {}
+        self.selected_resource_ids = selected_resource_ids
         self.records: list[dict[str, Any]] = []
 
     def __call__(self, obj: Any, record: ObjectRecord) -> None:
         self.export_object(obj, record)
 
+    def _mapped_relative(self, record: ObjectRecord) -> Path | None:
+        value = self.destination_map.get(record.resource_id)
+        if value is None:
+            return None
+        relative = Path(value)
+        if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+            raise ValueError(f"Unsafe preset destination: {value!r}")
+        return relative
+
     def export_object(self, obj: Any, record: ObjectRecord) -> dict[str, Any] | None:
         if record.type_name not in SUPPORTED_TYPES:
+            return None
+        if (
+            self.selected_resource_ids is not None
+            and record.resource_id not in self.selected_resource_ids
+        ):
             return None
 
         entry: dict[str, Any] = {
@@ -129,12 +150,13 @@ class ResourceExporter:
         }
         try:
             parsed = obj.parse_as_object()
+            mapped = self._mapped_relative(record)
             if record.type_name == "TextAsset":
-                self._export_text_asset(parsed, record, entry)
+                self._export_text_asset(parsed, record, entry, mapped)
             elif record.type_name == "AudioClip":
-                self._export_audio_clip(parsed, record, entry)
+                self._export_audio_clip(parsed, record, entry, mapped)
             else:
-                self._export_image(parsed, record, entry)
+                self._export_image(parsed, record, entry, mapped)
         except Exception as exc:
             entry["warnings"].append(f"{type(exc).__name__}: {exc}")
 
@@ -142,7 +164,11 @@ class ResourceExporter:
         return entry
 
     def _export_text_asset(
-        self, parsed: Any, record: ObjectRecord, entry: dict[str, Any]
+        self,
+        parsed: Any,
+        record: ObjectRecord,
+        entry: dict[str, Any],
+        mapped: Path | None,
     ) -> None:
         payload = getattr(parsed, "m_Script")
         if isinstance(payload, str):
@@ -152,7 +178,7 @@ class ResourceExporter:
         else:
             raise TypeError(f"Unsupported TextAsset payload type: {type(payload).__name__}")
 
-        relative = Path("text") / (
+        relative = mapped or Path("text") / (
             f"{_safe_stem(record.name)}__{record.path_id}_{record.resource_id[:10]}.txt"
         )
         destination = self.output_dir / relative
@@ -167,7 +193,11 @@ class ResourceExporter:
         })
 
     def _export_image(
-        self, parsed: Any, record: ObjectRecord, entry: dict[str, Any]
+        self,
+        parsed: Any,
+        record: ObjectRecord,
+        entry: dict[str, Any],
+        mapped: Path | None,
     ) -> None:
         _prepare_unitypy_export_import()
         image = getattr(parsed, "image")
@@ -188,9 +218,16 @@ class ResourceExporter:
             )
 
         folder = "texture2d" if record.type_name == "Texture2D" else "sprite"
-        relative = Path("images") / folder / (
-            f"{_safe_stem(record.name)}__{record.path_id}_{record.resource_id[:10]}.png"
-        )
+        if mapped is not None:
+            if mapped.suffix.lower() != ".png":
+                raise ValueError(
+                    f"Preset image destination must end with .png: {mapped.as_posix()!r}"
+                )
+            relative = mapped
+        else:
+            relative = Path("images") / folder / (
+                f"{_safe_stem(record.name)}__{record.path_id}_{record.resource_id[:10]}.png"
+            )
         destination = self.output_dir / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_name(destination.name + ".tmp")
@@ -224,7 +261,11 @@ class ResourceExporter:
         })
 
     def _export_audio_clip(
-        self, parsed: Any, record: ObjectRecord, entry: dict[str, Any]
+        self,
+        parsed: Any,
+        record: ObjectRecord,
+        entry: dict[str, Any],
+        mapped: Path | None,
     ) -> None:
         _prepare_unitypy_export_import()
         samples = getattr(parsed, "samples", None)
@@ -244,11 +285,20 @@ class ResourceExporter:
                     raise ValueError("Audio sample is empty.")
 
                 stem, extension = _audio_sample_name(sample_name)
-                relative = _unique_relative_path(
-                    Path("audio")
-                    / f"{clip_stem}__{record.path_id}_{record.resource_id[:10]}__{stem}{extension}",
-                    used_paths,
-                )
+                if mapped is None:
+                    relative = _unique_relative_path(
+                        Path("audio")
+                        / f"{clip_stem}__{record.path_id}_{record.resource_id[:10]}__{stem}{extension}",
+                        used_paths,
+                    )
+                elif index == 0:
+                    relative = _unique_relative_path(mapped, used_paths)
+                else:
+                    suffix = mapped.suffix or extension
+                    relative = _unique_relative_path(
+                        mapped.with_name(f"{mapped.stem}_{index}{suffix}"),
+                        used_paths,
+                    )
                 destination = self.output_dir / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 temporary = destination.with_name(destination.name + ".tmp")

@@ -24,7 +24,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dependency-depth", type=int, default=8, help="Maximum dependency-chain depth (default: 8)")
     parser.add_argument("--max-container-mb", type=int, default=512, help="Maximum size of one candidate container in MiB (default: 512)")
     parser.add_argument("--export-resources", action="store_true", help="Export supported Unity resources while enumerating objects")
-    parser.add_argument("--export-dir", help="Directory for exported resources and export-manifest.json (requires --export-resources)")
+    parser.add_argument("--export-dir", help="Directory for exported resources and export-manifest.json (requires --export-resources or --apply-plan)")
+    parser.add_argument("--adapter", choices=("phigros",), help="Add a game-specific analysis section (requires --enumerate-objects)")
+    parser.add_argument("--catalog", action="append", metavar="PATH", help="Additional Addressables JSON catalog used for adapter association (repeatable)")
+    parser.add_argument("--apply-plan", metavar="PATH", help="Export selected resources using an adapter export plan (requires --export-dir)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
@@ -102,6 +105,25 @@ def render_object_text(report: dict) -> str:
             f"  Matched key rows: {summary['matched_key_entry_count']}",
             f"  Unresolved key rows: {summary['unresolved_key_entry_count']}",
         ])
+    adapter = report.get("adapter")
+    if adapter:
+        detection = adapter["detection"]
+        summary = adapter["summary"]
+        lines.extend([
+            "",
+            f"Adapter: {adapter['adapter']} "
+            f"({detection['status']}, confidence: {detection['confidence']})",
+            f"  Songs: {summary['song_count']}",
+            f"  Difficulties: {summary['difficulty_count']}",
+            f"  Associated charts: {summary['associated_chart_count']}",
+            f"  Unassociated charts: {summary['unassociated_chart_count']}",
+            f"  Parsed charts: {summary['parsed_chart_count']}",
+            f"  Export preset entries: {adapter['export_preset']['entry_count']}",
+        ])
+        if adapter["diagnostics"]:
+            lines.extend(
+                f"  Diagnostic: {item}" for item in adapter["diagnostics"]
+            )
     graph = report.get("dependency_graph")
     if graph:
         summary = graph["summary"]
@@ -139,8 +161,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.export_resources and not args.export_dir:
         print("--export-resources requires --export-dir.", file=sys.stderr)
         return 2
-    if args.export_dir and not args.export_resources:
-        print("--export-dir requires --export-resources.", file=sys.stderr)
+    if args.export_dir and not (args.export_resources or args.apply_plan):
+        print("--export-dir requires --export-resources or --apply-plan.", file=sys.stderr)
+        return 2
+    if args.apply_plan and not args.export_dir:
+        print("--apply-plan requires --export-dir.", file=sys.stderr)
+        return 2
+    if args.apply_plan and not args.enumerate_objects:
+        print("--apply-plan requires --enumerate-objects.", file=sys.stderr)
+        return 2
+    if args.adapter and not args.enumerate_objects:
+        print("--adapter requires --enumerate-objects.", file=sys.stderr)
+        return 2
+    if args.catalog and not args.enumerate_objects:
+        print("--catalog requires --enumerate-objects.", file=sys.stderr)
         return 2
     if args.analyze_references and not args.enumerate_objects:
         print("--analyze-references requires --enumerate-objects.", file=sys.stderr)
@@ -162,23 +196,60 @@ def main(argv: list[str] | None = None) -> int:
         from .enumerator import UnityObjectEnumerator
 
         exporter = None
-        if args.export_resources:
+        destination_map = None
+        if args.apply_plan:
+            from .preset import load_plan_destinations
+            try:
+                destination_map = load_plan_destinations(args.apply_plan)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+        if args.export_resources or args.apply_plan:
             from .resource_exporter import ResourceExporter
-            exporter = ResourceExporter(args.export_dir)
+            selected = None
+            if args.apply_plan and not args.export_resources:
+                selected = set(destination_map or {})
+            exporter = ResourceExporter(
+                args.export_dir,
+                destination_map=destination_map,
+                selected_resource_ids=selected,
+            )
+        adapter = None
+        if args.adapter:
+            from .adapters.base import CompositeCallback
+            from .adapters.phigros import PhigrosAdapter
+            adapter = PhigrosAdapter()
+        callbacks = [item for item in (exporter, adapter) if item is not None]
+        callback = None
+        if len(callbacks) == 1:
+            callback = callbacks[0]
+        elif callbacks:
+            callback = CompositeCallback(*callbacks)
         try:
             enumerator = UnityObjectEnumerator(
                 max_container_bytes=args.max_container_mb * 1024 * 1024,
                 include_references=args.analyze_references,
-                object_callback=exporter,
+                object_callback=callback,
+                catalog_paths=args.catalog,
             )
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
             return 2
-        report = enumerator.enumerate(args.input).to_dict()
+        enumeration = enumerator.enumerate(args.input)
+        report = enumeration.to_dict()
+        if adapter is not None:
+            report["adapter"] = adapter.analyze(enumeration)
         if exporter is not None:
             try:
                 manifest_path = exporter.write_manifest()
                 report["resource_export"] = exporter.summary() | {"manifest_path": str(manifest_path)}
+                if destination_map:
+                    exported_ids = {
+                        item["resource_id"] for item in exporter.records
+                    }
+                    missing = sorted(set(destination_map) - exported_ids)
+                    report["resource_export"]["missing_plan_resource_count"] = len(missing)
+                    report["resource_export"]["missing_plan_resource_samples"] = missing[:20]
             except OSError as exc:
                 report.setdefault("errors", []).append(f"Could not write export manifest: {exc}")
                 report["scan_status"] = "partial" if report.get("objects") else "failed"

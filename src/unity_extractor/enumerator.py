@@ -27,6 +27,7 @@ MAX_OBJECTS = 1_000_000
 MAX_REFERENCES = 2_000_000
 MAX_COMPRESSION_RATIO = 1_000
 MAX_NESTED_ARCHIVE_DEPTH = 2
+MAX_TOTAL_CATALOG_KEY_ENTRIES = 200_000
 COPY_CHUNK_SIZE = 1024 * 1024
 ZIP_MAGICS = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 
@@ -82,6 +83,7 @@ class UnityObjectEnumerator:
         include_references: bool = False,
         max_references: int = MAX_REFERENCES,
         object_callback: Any | None = None,
+        catalog_paths: Iterable[str | os.PathLike[str]] | None = None,
     ) -> None:
         self.backend = backend or UnityPyBackend()
         self.max_container_bytes = max_container_bytes
@@ -90,6 +92,7 @@ class UnityObjectEnumerator:
         self.include_references = include_references
         self.max_references = max_references
         self.object_callback = object_callback
+        self.catalog_paths = list(catalog_paths or [])
         self._catalog_entries: list[
             tuple[dict[str, Any], list[str], list[dict[str, Any]]]
         ] = []
@@ -112,6 +115,7 @@ class UnityObjectEnumerator:
 
         try:
             budget = _ByteBudget(self.max_total_bytes)
+            self._inspect_extra_catalogs(report)
             if path.is_dir():
                 self._enumerate_directory(path, report, budget, depth=0)
             elif path.is_file() and zipfile.is_zipfile(path):
@@ -148,6 +152,13 @@ class UnityObjectEnumerator:
                 self._catalog_entries,
                 (record.source_id for record in report.objects),
             )
+            for _entry, _internal_ids, key_entries in self._catalog_entries:
+                remaining = (
+                    MAX_TOTAL_CATALOG_KEY_ENTRIES - len(report.catalog_key_entries)
+                )
+                if remaining <= 0:
+                    break
+                report.catalog_key_entries.extend(key_entries[:remaining])
 
         if report.errors and report.objects:
             report.scan_status = "partial"
@@ -386,6 +397,40 @@ class UnityObjectEnumerator:
                     temp_path.unlink(missing_ok=True)
                 except OSError as exc:
                     report.warnings.append(f"Could not remove temporary parser input: {exc}")
+
+    def _inspect_extra_catalogs(self, report: EnumerationReport) -> None:
+        seen: set[str] = set()
+        for value in self.catalog_paths:
+            path = Path(value).expanduser()
+            try:
+                resolved = str(path.resolve())
+            except OSError as exc:
+                report.warnings.append(
+                    f"Could not resolve Addressables catalog {value}: {exc}"
+                )
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            try:
+                if not path.is_file():
+                    report.warnings.append(
+                        f"Addressables catalog does not exist: {value}"
+                    )
+                    continue
+                if path.stat().st_size > MAX_CATALOG_BYTES:
+                    report.warnings.append(
+                        f"Skipped oversized Addressables catalog: {value}"
+                    )
+                    continue
+                with path.open("rb") as stream:
+                    data = stream.read(MAX_CATALOG_BYTES + 1)
+            except OSError as exc:
+                report.warnings.append(
+                    f"Could not read Addressables catalog {value}: {exc}"
+                )
+                continue
+            self._record_catalog(path.name, resolved, data, report)
 
     def _inspect_catalog_file(self, source: Path, logical_source_id: str, report: EnumerationReport) -> None:
         try:

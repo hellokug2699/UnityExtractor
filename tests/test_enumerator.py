@@ -431,3 +431,38 @@ def test_nested_archives_share_the_total_byte_budget(tmp_path):
         for warning in report.warnings
     )
 
+
+def test_external_catalog_supplies_key_rows_for_adapters(tmp_path):
+    root = tmp_path / "game"
+    (root / "assets").mkdir(parents=True)
+    (root / "assets" / "real.bundle").write_bytes(b"UnityFS" + b"\0" * 64)
+    catalog = tmp_path / "catalog.json"
+    catalog.write_bytes(make_catalog(["real.bundle"]))
+
+    report = UnityObjectEnumerator(
+        backend=FakeBackend([FakeObject(94, "real")]),
+        catalog_paths=[catalog],
+    ).enumerate(root)
+
+    assert report.inspected_containers == 1
+    assert report.addressables["summary"]["validated_catalog_count"] == 1
+    assert report.addressables["summary"]["matched_internal_id_count"] == 1
+    assert len(report.catalog_key_entries) == 1
+    assert report.catalog_key_entries[0]["key"] == "key-0"
+    assert "catalog_key_entries" not in report.to_dict()
+
+
+def test_missing_external_catalog_is_a_warning(tmp_path):
+    root = tmp_path / "game"
+    root.mkdir()
+    (root / "real.bundle").write_bytes(b"UnityFS" + b"\0" * 64)
+
+    report = UnityObjectEnumerator(
+        backend=FakeBackend([FakeObject(95, "real")]),
+        catalog_paths=[tmp_path / "missing.json"],
+    ).enumerate(root)
+
+    assert len(report.objects) == 1
+    assert any("does not exist" in warning for warning in report.warnings)
+
+

@@ -151,6 +151,45 @@ JSON catalog 的 `m_KeyDataString`、`m_BucketDataString` 和 `m_EntryDataString
 
 嵌套压缩包会按 ZIP 头部识别并递归检查，最大嵌套深度为 2。APK / ZIP 或目录中的 `StreamingAssets` 内层 ZIP 只要包含 Unity Bundle、SerializedFile 或 Addressables catalog 就会被继续枚举，来源路径保留为 `outer.apk!/inner.zip!/assets/x.bundle`。嵌套成员与普通候选容器共享总字节预算，并受单容器大小、压缩比、容器数量和临时文件清理限制。传统 AssetBundle 和独立 SerializedFile 仍按原有路径发现，Addressables 不是必需布局。
 
+## Phigros 适配器（P4）
+
+Phigros 规则全部位于 `unity_extractor.adapters.phigros`，核心扫描、枚举和导出模块不导入任何具体游戏适配器。
+
+```bash
+unity-extractor /path/to/game.apk \
+  --enumerate-objects \
+  --adapter phigros \
+  --catalog /path/to/catalog.json \
+  --format json \
+  --output phigros.json
+```
+
+`--catalog` 可重复指定额外的 Addressables JSON catalog，用于关联 APK 内未携带 catalog 的情况；APK / 目录中发现的内置 catalog 仍会自动使用。
+
+报告中的 `adapter` 字段包含：
+
+- `detection`：依据 `Chart_*` TextAsset、`music` AudioClip、`Illustration*` 贴图和 `Assets/Tracks/` catalog key 给出 `detected` / `not_detected` 与置信度；
+- `songs`：按 catalog 路径 `Assets/Tracks/{song_id}/...` 关联的歌曲，包含难度、chart 资源、music 资源、插画资源和未匹配 catalog 项；
+- `unassociated_charts`：没有 catalog 映射时仍可提取的 chart 列表；
+- `export_preset`：确定性的导出计划，目标路径为 `phigros/songs/{song_id}/charts|audio|illustrations/...`，未关联 chart 写入 `phigros/unassociated/charts/`。
+
+Chart 解析会读取 `formatVersion`、`offset`、`numOfNotes`、`judgeLineList`，统计 BPM 范围、判定线数量、note 类型分布和时长。难度统一为 `EZ` / `HD` / `IN` / `AT` / `SP` / `Legacy`，并识别 `_Error` 变体；未知难度保留原值并标记 `recognized: false`。单个 chart 解析失败只记录在 `chart_metadata` 和诊断中，不会中断其他对象。
+
+Phigros APK 中的 Unity 对象不包含歌曲标题和作者；适配器只报告 catalog 能提供的歌曲 ID，`title` / `artist` 保持 `null` 并给出诊断。
+
+`export_preset` 可直接执行：
+
+```bash
+unity-extractor /path/to/game.apk \
+  --enumerate-objects \
+  --apply-plan phigros.json \
+  --export-dir ./phigros-export \
+  --format json \
+  --output phigros-export-report.json
+```
+
+`--apply-plan` 会读取报告中的 `export_preset.entries`，按 `resource_id` 将 chart、music 和插画写到计划路径，并生成 `export-manifest.json`。目标路径必须是相对路径，禁止 `..`、绝对路径和重复目标；计划中未在本次输入找到的资源会计入 `missing_plan_resource_count`，不会静默忽略。`--apply-plan` 也可与 `--export-resources` 同时使用：计划资源写入适配器路径，其余受支持资源继续使用通用导出布局。文件内容仍由通用导出器负责，适配器不实现自己的 Unity 解析或资源转码。
+
 ## 安全与限制
 
 - 不执行游戏包内代码。
