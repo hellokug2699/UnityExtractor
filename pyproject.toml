@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unity-extractor"
+version = "0.1.0"
+description = "Evidence-based scanner for Unity game packages and resource layouts"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "UnityExtractor contributors" }]
+dependencies = []
+
+[project.scripts]
+unity-extractor = "unity_extractor.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
