@@ -104,3 +104,12 @@ def test_directory_reports_oversized_files(tmp_path):
     report = UnityScanner().scan(tmp_path)
     assert report.scan_status == "completed"
     assert any("Skipped oversized file" in warning for warning in report.warnings)
+
+
+
+def test_malformed_zip_like_input_does_not_crash(tmp_path):
+    malformed = tmp_path / "broken.apk"
+    malformed.write_bytes(b"PK\\x03\\x04 this is not a valid archive")
+    report = UnityScanner().scan(malformed)
+    assert report.scan_status == "completed"
+    assert report.engine_name == "unknown"
