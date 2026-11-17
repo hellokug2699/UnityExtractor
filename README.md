@@ -1,6 +1,6 @@
 # UnityExtractor
 
-面向 Unity 游戏的证据驱动扫描与通用资源检查工具。项目采用模块化设计，将 Unity 容器解析与具体游戏的数据解释分离。
+面向 Unity 游戏的证据驱动扫描与通用资源检查工具。项目采用模块化设计，将 Unity 容器解析与具体游戏的数据解释分离。核心扫描、对象枚举、资源布局、导出和依赖分析均不包含游戏名分支；Phigros 只是 P4 的可选适配器，不是架构前提。
 
 ## 环境要求
 
@@ -151,7 +151,7 @@ JSON catalog 的 `m_KeyDataString`、`m_BucketDataString` 和 `m_EntryDataString
 
 嵌套压缩包会按 ZIP 头部识别并递归检查，最大嵌套深度为 2。APK / ZIP 或目录中的 `StreamingAssets` 内层 ZIP 只要包含 Unity Bundle、SerializedFile 或 Addressables catalog 就会被继续枚举，来源路径保留为 `outer.apk!/inner.zip!/assets/x.bundle`。嵌套成员与普通候选容器共享总字节预算，并受单容器大小、压缩比、容器数量和临时文件清理限制。传统 AssetBundle 和独立 SerializedFile 仍按原有路径发现，Addressables 不是必需布局。
 
-## Phigros 适配器（P4）
+## Phigros 适配器（P4，可选）
 
 Phigros 规则全部位于 `unity_extractor.adapters.phigros`，核心扫描、枚举和导出模块不导入任何具体游戏适配器。
 
@@ -189,6 +189,18 @@ unity-extractor /path/to/game.apk \
 ```
 
 `--apply-plan` 会读取报告中的 `export_preset.entries`，按 `resource_id` 将 chart、music 和插画写到计划路径，并生成 `export-manifest.json`。目标路径必须是相对路径，禁止 `..`、绝对路径和重复目标；计划中未在本次输入找到的资源会计入 `missing_plan_resource_count`，不会静默忽略。`--apply-plan` 也可与 `--export-resources` 同时使用：计划资源写入适配器路径，其余受支持资源继续使用通用导出布局。文件内容仍由通用导出器负责，适配器不实现自己的 Unity 解析或资源转码。
+
+## 通用性验收（P5）
+
+通用能力不依赖 Phigros、Addressables 或某一种目录结构。测试覆盖以下组合，且不需要加载任何游戏适配器：
+
+- 传统 AssetBundle 目录与独立 SerializedFile 同时存在；
+- Addressables catalog 与无 catalog 的传统布局共存；
+- `StreamingAssets` 内层 ZIP 中的 Bundle 继续递归发现；
+- 非 Unity 输入和畸形输入只产生诊断，不中断整个扫描；
+- 同一输入在启用可选 adapter 前后，对象身份、布局摘要和 warning 保持一致。
+
+测试 `test_core_modules_contain_no_game_specific_branches` 会检查核心模块不存在 Phigros 分支。新增游戏支持应放在独立 adapter 或后端适配层；如果证据只够支持某个布局，应在报告中保留 `unsupported` / 未解析状态，而不是假设所有 Unity 游戏使用同一资源结构。
 
 ## 安全与限制
 
