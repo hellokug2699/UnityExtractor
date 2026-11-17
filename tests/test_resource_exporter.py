@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+
+import pytest
 from types import SimpleNamespace
 
 from unity_extractor.object_models import ObjectRecord
@@ -187,3 +189,18 @@ def test_unsupported_types_are_not_added_to_export_manifest(tmp_path):
 
     assert exporter.export_object(object(), record) is None
     assert exporter.records == []
+
+
+
+def test_android_fmod_placeholder_allows_unitypy_image_export_import(monkeypatch):
+    import sys
+    import unity_extractor.resource_exporter as resource_exporter
+
+    monkeypatch.setattr(resource_exporter.platform, "system", lambda: "Android")
+    monkeypatch.delitem(sys.modules, "fmod_toolkit", raising=False)
+
+    resource_exporter._prepare_unitypy_export_import()
+
+    fmod_toolkit = sys.modules["fmod_toolkit"]
+    with pytest.raises(RuntimeError, match="unavailable on Android"):
+        fmod_toolkit.raw_to_wav(b"audio", "clip", 2, 44100)
