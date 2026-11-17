@@ -15,6 +15,7 @@ dependencies = []
 [project.scripts]
 unity-extractor = "unity_extractor.cli:main"
 unity-extractor-verify-archive = "unity_extractor.archive_validator:main"
+unity-extractor-desktop = "unity_extractor.platforms.desktop.app:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]

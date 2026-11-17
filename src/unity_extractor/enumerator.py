@@ -6,8 +6,16 @@ import os
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
+from .addressables import (
+    MAX_CATALOG_BYTES,
+    MAX_CATALOGS,
+    MAX_CATALOG_TOTAL_BYTES,
+    build_addressables_report,
+    inspect_catalog,
+    is_catalog_candidate_name,
+)
 from .backends.unitypy import UnityPyBackend
 from .object_models import EnumerationReport, ObjectRecord, ObjectReference
 from .scanner import BUNDLE_MAGICS, _looks_like_serialized_header
@@ -18,7 +26,28 @@ MAX_TOTAL_CONTAINER_BYTES = 2 * 1024 * 1024 * 1024
 MAX_OBJECTS = 1_000_000
 MAX_REFERENCES = 2_000_000
 MAX_COMPRESSION_RATIO = 1_000
+MAX_NESTED_ARCHIVE_DEPTH = 2
+MAX_TOTAL_CATALOG_KEY_ENTRIES = 200_000
 COPY_CHUNK_SIZE = 1024 * 1024
+ZIP_MAGICS = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+
+
+class _ByteBudget:
+    """Shared byte budget for nested archive members and containers."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.used = 0
+
+    def take(self, amount: int) -> bool:
+        if amount < 0 or self.used + amount > self.limit:
+            return False
+        self.used += amount
+        return True
+
+
+def _is_zip_prefix(prefix: bytes) -> bool:
+    return any(prefix.startswith(magic) for magic in ZIP_MAGICS)
 
 
 def _is_candidate(prefix: bytes) -> bool:
@@ -53,6 +82,9 @@ class UnityObjectEnumerator:
         include_references: bool = False,
         max_references: int = MAX_REFERENCES,
         object_callback: Any | None = None,
+        catalog_paths: Iterable[str | os.PathLike[str]] | None = None,
+        cancel_event: Any | None = None,
+        progress_callback: Callable[[str, int, int | None], None] | None = None,
     ) -> None:
         self.backend = backend or UnityPyBackend()
         self.max_container_bytes = max_container_bytes
@@ -61,9 +93,47 @@ class UnityObjectEnumerator:
         self.include_references = include_references
         self.max_references = max_references
         self.object_callback = object_callback
+        self.catalog_paths = list(catalog_paths or [])
+        self.cancel_event = cancel_event
+        self.progress_callback = progress_callback
+        self._cancelled = False
+        self._catalog_entries: list[
+            tuple[dict[str, Any], list[str], list[dict[str, Any]]]
+        ] = []
+        self._catalog_bytes = 0
+
+    def _is_cancelled(self) -> bool:
+        if self._cancelled:
+            return True
+        event = self.cancel_event
+        if event is not None:
+            try:
+                if event.is_set():
+                    self._cancelled = True
+            except Exception:
+                pass
+        return self._cancelled
+
+    def _mark_cancelled(self, report: EnumerationReport) -> None:
+        self._cancelled = True
+        if "Scan cancelled by user." not in report.warnings:
+            report.warnings.append("Scan cancelled by user.")
+
+    def _progress(self, stage: str, processed: int, total: int | None = None) -> None:
+        callback = self.progress_callback
+        if callback is None:
+            return
+        try:
+            callback(stage, processed, total)
+        except Exception:
+            # Progress observers must never break the scan.
+            pass
 
     def enumerate(self, input_path: str | os.PathLike[str]) -> EnumerationReport:
         path = Path(input_path).expanduser()
+        self._catalog_entries = []
+        self._catalog_bytes = 0
+        self._cancelled = False
         report = EnumerationReport(
             schema_version="1.0",
             input_path=str(path),
@@ -74,16 +144,37 @@ class UnityObjectEnumerator:
             report.scan_status = "failed"
             report.errors.append("Input path does not exist or is not accessible.")
             return report
+        if self._is_cancelled():
+            self._mark_cancelled(report)
+            report.scan_status = "cancelled"
+            return report
 
         try:
+            budget = _ByteBudget(self.max_total_bytes)
+            self._inspect_extra_catalogs(report)
             if path.is_dir():
-                self._enumerate_directory(path, report)
+                self._enumerate_directory(path, report, budget, depth=0)
             elif path.is_file() and zipfile.is_zipfile(path):
-                self._enumerate_archive(path, report)
+                self._enumerate_archive(
+                    path, report, budget, depth=0, logical_archive_id=str(path)
+                )
             elif path.is_file():
                 size = path.stat().st_size
+                is_catalog = is_catalog_candidate_name(path.name)
+                if is_catalog:
+                    self._inspect_catalog_file(path, str(path.resolve()), report)
                 if size > self.max_container_bytes:
                     report.warnings.append(f"Skipped oversized standalone input ({size} bytes).")
+                elif is_catalog:
+                    with path.open("rb") as stream:
+                        prefix = stream.read(32)
+                    if _is_candidate(prefix):
+                        self._enumerate_file(path, str(path.resolve()), report)
+                    else:
+                        report.warnings.append(
+                            "Standalone catalog candidate has no Unity container signature; "
+                            "object enumeration was skipped."
+                        )
                 else:
                     self._enumerate_file(path, str(path.resolve()), report)
             else:
@@ -92,44 +183,110 @@ class UnityObjectEnumerator:
         except Exception as exc:
             report.errors.append(f"{type(exc).__name__}: {exc}")
 
-        if report.errors and report.objects:
+        if self._catalog_entries:
+            report.addressables = build_addressables_report(
+                self._catalog_entries,
+                (record.source_id for record in report.objects),
+            )
+            for _entry, _internal_ids, key_entries in self._catalog_entries:
+                remaining = (
+                    MAX_TOTAL_CATALOG_KEY_ENTRIES - len(report.catalog_key_entries)
+                )
+                if remaining <= 0:
+                    break
+                report.catalog_key_entries.extend(key_entries[:remaining])
+
+        if self._cancelled:
+            self._mark_cancelled(report)
+            report.scan_status = "cancelled"
+        elif report.errors and report.objects:
             report.scan_status = "partial"
         elif report.errors and not report.objects:
             report.scan_status = "failed"
         elif not report.inspected_containers:
             report.warnings.append("No supported SerializedFile or AssetBundle candidates were found.")
+        self._progress("completed", len(report.objects))
         return report
 
-    def _enumerate_directory(self, root: Path, report: EnumerationReport) -> None:
-        total_bytes = 0
+    def _enumerate_directory(
+        self,
+        root: Path,
+        report: EnumerationReport,
+        budget: _ByteBudget,
+        depth: int,
+    ) -> None:
         for current, dirs, names in os.walk(root):
             dirs[:] = [name for name in dirs if name not in {".git", "__pycache__"}]
             for name in names:
+                if self._is_cancelled():
+                    self._mark_cancelled(report)
+                    return
                 if report.inspected_containers >= MAX_CONTAINERS:
                     report.warnings.append(f"Container limit reached ({MAX_CONTAINERS}).")
                     return
                 source = Path(current) / name
+                rel = source.relative_to(root).as_posix()
+                logical_source_id = f"{root.resolve()}!/{rel}"
                 try:
                     size = source.stat().st_size
+                    if is_catalog_candidate_name(name):
+                        self._inspect_catalog_file(source, logical_source_id, report)
                     with source.open("rb") as stream:
                         prefix = stream.read(32)
-                    if not _is_candidate(prefix):
+                    if _is_candidate(prefix):
+                        if size > self.max_container_bytes:
+                            report.warnings.append(f"Skipped oversized candidate: {rel}")
+                            continue
+                        if not budget.take(size):
+                            report.warnings.append("Total container byte limit reached; remaining candidate files were not inspected.")
+                            return
+                        self._enumerate_file(source, logical_source_id, report)
+                        continue
+                    if not _is_zip_prefix(prefix):
+                        continue
+                    if depth >= MAX_NESTED_ARCHIVE_DEPTH:
+                        report.warnings.append(
+                            f"Nested archive depth limit reached: {logical_source_id}"
+                        )
                         continue
                     if size > self.max_container_bytes:
-                        report.warnings.append(f"Skipped oversized candidate: {source.relative_to(root).as_posix()}")
+                        report.warnings.append(f"Skipped oversized nested archive: {rel}")
                         continue
-                    if total_bytes + size > self.max_total_bytes:
-                        report.warnings.append("Total container byte limit reached; remaining candidate files were not inspected.")
+                    if not budget.take(size):
+                        report.warnings.append(
+                            "Total container byte limit reached; "
+                            "remaining nested archives were not inspected."
+                        )
                         return
-                    total_bytes += size
-                    self._enumerate_file(source, f"{root.resolve()}!/{source.relative_to(root).as_posix()}", report)
+                    try:
+                        self._enumerate_archive(
+                            source,
+                            report,
+                            budget,
+                            depth=depth + 1,
+                            logical_archive_id=logical_source_id,
+                        )
+                    except (OSError, zipfile.BadZipFile) as exc:
+                        report.warnings.append(
+                            f"{logical_source_id}: nested archive could not be inspected: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
                 except OSError as exc:
                     report.warnings.append(f"Could not inspect {source}: {exc}")
 
-    def _enumerate_archive(self, archive_path: Path, report: EnumerationReport) -> None:
-        total_bytes = 0
+    def _enumerate_archive(
+        self,
+        archive_path: Path,
+        report: EnumerationReport,
+        budget: _ByteBudget,
+        depth: int,
+        logical_archive_id: str,
+    ) -> None:
         with zipfile.ZipFile(archive_path) as archive:
             for info in archive.infolist():
+                if self._is_cancelled():
+                    self._mark_cancelled(report)
+                    return
                 if info.is_dir():
                     continue
                 if report.inspected_containers >= MAX_CONTAINERS:
@@ -141,28 +298,125 @@ class UnityObjectEnumerator:
                     # so unrelated APK entries cannot consume the candidate budget.
                     with archive.open(info) as stream:
                         prefix = stream.read(32)
-                    if not _is_candidate(prefix):
+                    if is_catalog_candidate_name(logical_name):
+                        self._inspect_archive_catalog(
+                            archive,
+                            info,
+                            logical_name,
+                            logical_archive_id,
+                            report,
+                        )
+                    if _is_candidate(prefix):
+                        if info.file_size > self.max_container_bytes:
+                            report.warnings.append(f"Skipped oversized archive member: {logical_name}")
+                            continue
+                        if info.compress_size and info.file_size / info.compress_size > MAX_COMPRESSION_RATIO:
+                            report.warnings.append(f"Skipped suspicious compression ratio: {logical_name}")
+                            continue
+                        if not budget.take(info.file_size):
+                            report.warnings.append("Total container byte limit reached; remaining candidate archive members were not inspected.")
+                            return
+                        self._enumerate_archive_member(
+                            archive_path,
+                            info,
+                            logical_name,
+                            logical_archive_id,
+                            report,
+                        )
+                        continue
+                    if not _is_zip_prefix(prefix):
+                        continue
+                    if depth >= MAX_NESTED_ARCHIVE_DEPTH:
+                        report.warnings.append(
+                            f"Nested archive depth limit reached: "
+                            f"{logical_archive_id}!/{logical_name}"
+                        )
                         continue
                     if info.file_size > self.max_container_bytes:
-                        report.warnings.append(f"Skipped oversized archive member: {logical_name}")
+                        report.warnings.append(
+                            f"Skipped oversized nested archive: {logical_name}"
+                        )
                         continue
                     if info.compress_size and info.file_size / info.compress_size > MAX_COMPRESSION_RATIO:
-                        report.warnings.append(f"Skipped suspicious compression ratio: {logical_name}")
+                        report.warnings.append(
+                            f"Skipped suspicious compression ratio: {logical_name}"
+                        )
                         continue
-                    if total_bytes + info.file_size > self.max_total_bytes:
-                        report.warnings.append("Total container byte limit reached; remaining candidate archive members were not inspected.")
+                    if not budget.take(info.file_size):
+                        report.warnings.append(
+                            "Total container byte limit reached; "
+                            "remaining nested archives were not inspected."
+                        )
                         return
-                    total_bytes += info.file_size
-                    self._enumerate_archive_member(archive_path, info, logical_name, report)
+                    self._enumerate_nested_archive_member(
+                        archive,
+                        info,
+                        logical_name,
+                        logical_archive_id,
+                        report,
+                        budget,
+                        depth + 1,
+                    )
                 except Exception as exc:
                     # Isolate malformed members and parser failures; keep scanning siblings.
                     report.errors.append(f"{logical_name}: {type(exc).__name__}: {exc}")
+
+    def _enumerate_nested_archive_member(
+        self,
+        archive: zipfile.ZipFile,
+        info: zipfile.ZipInfo,
+        logical_name: str,
+        logical_archive_id: str,
+        report: EnumerationReport,
+        budget: _ByteBudget,
+        depth: int,
+    ) -> None:
+        nested_source_id = f"{logical_archive_id}!/{logical_name}"
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix="unityextractor-nested-", suffix=".zip", delete=False
+            ) as target:
+                temp_path = Path(target.name)
+                copied = 0
+                with archive.open(info) as source:
+                    while True:
+                        chunk = source.read(COPY_CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        copied += len(chunk)
+                        if copied > self.max_container_bytes:
+                            raise ValueError(
+                                "Nested archive exceeded configured extraction limit."
+                            )
+                        target.write(chunk)
+            self._enumerate_archive(
+                temp_path,
+                report,
+                budget,
+                depth=depth,
+                logical_archive_id=nested_source_id,
+            )
+        except (OSError, RuntimeError, zipfile.BadZipFile, ValueError) as exc:
+            report.warnings.append(
+                f"{nested_source_id}: nested archive could not be inspected: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    report.warnings.append(
+                        f"Could not remove temporary nested archive: {exc}"
+                    )
 
     def _enumerate_archive_member(
         self,
         archive_path: Path,
         info: zipfile.ZipInfo,
         logical_name: str,
+        logical_archive_id: str,
         report: EnumerationReport,
     ) -> None:
         suffix = Path(logical_name).suffix[:16]
@@ -180,7 +434,9 @@ class UnityObjectEnumerator:
                         if copied > self.max_container_bytes:
                             raise ValueError("Archive member exceeded configured extraction limit.")
                         target.write(chunk)
-            self._enumerate_file(temp_path, f"{archive_path}!/{logical_name}", report)
+            self._enumerate_file(
+                temp_path, f"{logical_archive_id}!/{logical_name}", report
+            )
         finally:
             if temp_path is not None:
                 try:
@@ -188,10 +444,125 @@ class UnityObjectEnumerator:
                 except OSError as exc:
                     report.warnings.append(f"Could not remove temporary parser input: {exc}")
 
+    def _inspect_extra_catalogs(self, report: EnumerationReport) -> None:
+        seen: set[str] = set()
+        for value in self.catalog_paths:
+            if self._is_cancelled():
+                self._mark_cancelled(report)
+                return
+            path = Path(value).expanduser()
+            try:
+                resolved = str(path.resolve())
+            except OSError as exc:
+                report.warnings.append(
+                    f"Could not resolve Addressables catalog {value}: {exc}"
+                )
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            try:
+                if not path.is_file():
+                    report.warnings.append(
+                        f"Addressables catalog does not exist: {value}"
+                    )
+                    continue
+                if path.stat().st_size > MAX_CATALOG_BYTES:
+                    report.warnings.append(
+                        f"Skipped oversized Addressables catalog: {value}"
+                    )
+                    continue
+                with path.open("rb") as stream:
+                    data = stream.read(MAX_CATALOG_BYTES + 1)
+            except OSError as exc:
+                report.warnings.append(
+                    f"Could not read Addressables catalog {value}: {exc}"
+                )
+                continue
+            self._record_catalog(path.name, resolved, data, report)
+
+    def _inspect_catalog_file(self, source: Path, logical_source_id: str, report: EnumerationReport) -> None:
+        try:
+            size = source.stat().st_size
+            if size > MAX_CATALOG_BYTES:
+                report.warnings.append(
+                    f"Skipped oversized Addressables catalog: {logical_source_id}"
+                )
+                return
+            with source.open("rb") as stream:
+                data = stream.read(MAX_CATALOG_BYTES + 1)
+        except OSError as exc:
+            report.warnings.append(
+                f"Could not read Addressables catalog {logical_source_id}: {exc}"
+            )
+            return
+        self._record_catalog(source.name, logical_source_id, data, report)
+
+    def _inspect_archive_catalog(
+        self,
+        archive: zipfile.ZipFile,
+        info: zipfile.ZipInfo,
+        logical_name: str,
+        logical_archive_id: str,
+        report: EnumerationReport,
+    ) -> None:
+        logical_source_id = f"{logical_archive_id}!/{logical_name}"
+        if info.file_size > MAX_CATALOG_BYTES:
+            report.warnings.append(
+                f"Skipped oversized Addressables catalog: {logical_source_id}"
+            )
+            return
+        if info.compress_size and info.file_size / info.compress_size > MAX_COMPRESSION_RATIO:
+            report.warnings.append(
+                f"Skipped Addressables catalog with a suspicious compression ratio: {logical_source_id}"
+            )
+            return
+        try:
+            with archive.open(info) as stream:
+                data = stream.read(MAX_CATALOG_BYTES + 1)
+        except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+            report.warnings.append(
+                f"Could not read Addressables catalog {logical_source_id}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return
+        self._record_catalog(logical_name, logical_source_id, data, report)
+
+    def _record_catalog(
+        self,
+        name: str,
+        logical_source_id: str,
+        data: bytes,
+        report: EnumerationReport,
+    ) -> None:
+        if len(self._catalog_entries) >= MAX_CATALOGS:
+            report.warnings.append(f"Addressables catalog limit reached ({MAX_CATALOGS}).")
+            return
+        if len(data) > MAX_CATALOG_BYTES:
+            report.warnings.append(
+                f"Addressables catalog exceeds the {MAX_CATALOG_BYTES}-byte limit: "
+                f"{logical_source_id}"
+            )
+            return
+        if self._catalog_bytes + len(data) > MAX_CATALOG_TOTAL_BYTES:
+            report.warnings.append(
+                "Total Addressables catalog byte limit reached; "
+                "remaining catalogs were not inspected."
+            )
+            return
+        self._catalog_bytes += len(data)
+        entry, internal_ids, key_entries = inspect_catalog(
+            logical_source_id, name, data
+        )
+        self._catalog_entries.append((entry, internal_ids, key_entries))
+        for warning in entry["warnings"]:
+            report.warnings.append(f"{logical_source_id}: {warning}")
+
     def _enumerate_file(self, source: Path, logical_source_id: str, report: EnumerationReport) -> None:
         try:
             env = self.backend.load(source)
             report.inspected_containers += 1
+            self._progress("containers", report.inspected_containers)
         except Exception as exc:
             report.errors.append(f"{logical_source_id}: parser failed: {type(exc).__name__}: {exc}")
             return
@@ -199,10 +570,15 @@ class UnityObjectEnumerator:
         try:
             objects: Iterable[Any] = env.objects
             for obj in objects:
+                if self._is_cancelled():
+                    self._mark_cancelled(report)
+                    return
                 if len(report.objects) >= self.max_objects:
                     report.warnings.append(f"Object limit reached ({self.max_objects}).")
                     return
                 record = self._append_object(obj, logical_source_id, report)
+                if record is not None:
+                    self._progress("objects", len(report.objects))
                 if record is not None and self.object_callback is not None:
                     try:
                         self.object_callback(obj, record)

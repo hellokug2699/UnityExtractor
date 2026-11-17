@@ -6,7 +6,8 @@ import json
 import sys
 
 from . import __version__
-from .scanner import UnityScanner
+from .adapters.registry import available_adapters, create_adapter
+from .workflow import ScanRequest, run_scan
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,7 +25,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dependency-depth", type=int, default=8, help="Maximum dependency-chain depth (default: 8)")
     parser.add_argument("--max-container-mb", type=int, default=512, help="Maximum size of one candidate container in MiB (default: 512)")
     parser.add_argument("--export-resources", action="store_true", help="Export supported Unity resources while enumerating objects")
-    parser.add_argument("--export-dir", help="Directory for exported resources and export-manifest.json (requires --export-resources)")
+    parser.add_argument("--export-dir", help="Directory for exported resources and export-manifest.json (requires --export-resources or --apply-plan)")
+    parser.add_argument("--adapter", choices=tuple(available_adapters()), help="Add a game-specific analysis section (requires --enumerate-objects)")
+    parser.add_argument("--catalog", action="append", metavar="PATH", help="Additional Addressables JSON catalog used for adapter association (repeatable)")
+    parser.add_argument("--apply-plan", metavar="PATH", help="Export selected resources using an adapter export plan (requires --export-dir)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
@@ -86,6 +90,41 @@ def render_object_text(report: dict) -> str:
             f"  Failed objects: {export['failed_object_count']}",
             f"  Manifest: {export['manifest_path']}",
         ])
+    addressables = report.get("addressables")
+    if addressables:
+        summary = addressables["summary"]
+        lines.extend([
+            "",
+            "Addressables:",
+            f"  Catalog candidates: {summary['catalog_candidate_count']}",
+            f"  Validated catalogs: {summary['validated_catalog_count']}",
+            f"  Internal IDs: {summary['internal_id_count']}",
+            f"  Matched internal IDs: {summary['matched_internal_id_count']}",
+            f"  Unresolved internal IDs: {summary['unresolved_internal_id_count']}",
+            f"  Key mapping: {summary['key_mapping_status']}",
+            f"  Key-to-location rows: {summary['key_entry_count']}",
+            f"  Matched key rows: {summary['matched_key_entry_count']}",
+            f"  Unresolved key rows: {summary['unresolved_key_entry_count']}",
+        ])
+    adapter = report.get("adapter")
+    if adapter:
+        detection = adapter["detection"]
+        summary = adapter["summary"]
+        lines.extend([
+            "",
+            f"Adapter: {adapter['adapter']} "
+            f"({detection['status']}, confidence: {detection['confidence']})",
+            f"  Songs: {summary['song_count']}",
+            f"  Difficulties: {summary['difficulty_count']}",
+            f"  Associated charts: {summary['associated_chart_count']}",
+            f"  Unassociated charts: {summary['unassociated_chart_count']}",
+            f"  Parsed charts: {summary['parsed_chart_count']}",
+            f"  Export preset entries: {adapter['export_preset']['entry_count']}",
+        ])
+        if adapter["diagnostics"]:
+            lines.extend(
+                f"  Diagnostic: {item}" for item in adapter["diagnostics"]
+            )
     graph = report.get("dependency_graph")
     if graph:
         summary = graph["summary"]
@@ -123,8 +162,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.export_resources and not args.export_dir:
         print("--export-resources requires --export-dir.", file=sys.stderr)
         return 2
-    if args.export_dir and not args.export_resources:
-        print("--export-dir requires --export-resources.", file=sys.stderr)
+    if args.export_dir and not (args.export_resources or args.apply_plan):
+        print("--export-dir requires --export-resources or --apply-plan.", file=sys.stderr)
+        return 2
+    if args.apply_plan and not args.export_dir:
+        print("--apply-plan requires --export-dir.", file=sys.stderr)
+        return 2
+    if args.apply_plan and not args.enumerate_objects:
+        print("--apply-plan requires --enumerate-objects.", file=sys.stderr)
+        return 2
+    if args.adapter and not args.enumerate_objects:
+        print("--adapter requires --enumerate-objects.", file=sys.stderr)
+        return 2
+    if args.catalog and not args.enumerate_objects:
+        print("--catalog requires --enumerate-objects.", file=sys.stderr)
         return 2
     if args.analyze_references and not args.enumerate_objects:
         print("--analyze-references requires --enumerate-objects.", file=sys.stderr)
@@ -143,41 +194,32 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.enumerate_objects:
-        from .enumerator import UnityObjectEnumerator
-
-        exporter = None
-        if args.export_resources:
-            from .resource_exporter import ResourceExporter
-            exporter = ResourceExporter(args.export_dir)
+        adapter = create_adapter(args.adapter)
+        request = ScanRequest(
+            input_path=args.input,
+            enumerate_objects=True,
+            analyze_references=args.analyze_references,
+            analyze_dependencies=args.analyze_dependencies,
+            dependency_root=args.dependency_root,
+            dependency_depth=args.dependency_depth,
+            max_container_mb=args.max_container_mb,
+            export_resources=args.export_resources,
+            export_dir=args.export_dir,
+            apply_plan=args.apply_plan,
+            adapter=adapter,
+            catalog_paths=args.catalog or [],
+        )
         try:
-            enumerator = UnityObjectEnumerator(
-                max_container_bytes=args.max_container_mb * 1024 * 1024,
-                include_references=args.analyze_references,
-                object_callback=exporter,
-            )
+            report = run_scan(request)
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
             return 2
-        report = enumerator.enumerate(args.input).to_dict()
-        if exporter is not None:
-            try:
-                manifest_path = exporter.write_manifest()
-                report["resource_export"] = exporter.summary() | {"manifest_path": str(manifest_path)}
-            except OSError as exc:
-                report.setdefault("errors", []).append(f"Could not write export manifest: {exc}")
-                report["scan_status"] = "partial" if report.get("objects") else "failed"
-        if args.analyze_dependencies:
-            from .dependency_graph import build_dependency_graph
-
-            report["dependency_graph"] = build_dependency_graph(
-                report["objects"],
-                report["references"],
-                root_resource_id=args.dependency_root,
-                max_depth=args.dependency_depth,
-            )
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
         rendered = json.dumps(report, ensure_ascii=False, indent=2) if args.format == "json" else render_object_text(report)
     else:
-        report = UnityScanner().scan(args.input).to_dict()
+        report = run_scan(ScanRequest(input_path=args.input))
         rendered = json.dumps(report, ensure_ascii=False, indent=2) if args.format == "json" else render_text(report)
     if args.output:
         try:

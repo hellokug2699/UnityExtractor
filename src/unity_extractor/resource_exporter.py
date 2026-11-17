@@ -14,16 +14,18 @@ from .object_models import ObjectRecord
 
 MAX_IMAGE_PIXELS = 100_000_000
 HASH_CHUNK_SIZE = 1024 * 1024
+SUPPORTED_TYPES = ("TextAsset", "Texture2D", "Sprite", "AudioClip")
+AUDIO_EXTENSIONS = {".wav", ".ogg", ".m4a"}
 
 
 def _prepare_unitypy_export_import() -> None:
-    """Keep UnityPy image exporters usable when FMOD is unavailable on Android.
+    """Keep UnityPy exporters usable when FMOD is unavailable on Android.
 
     UnityPy eagerly imports every exporter from UnityPy.export. Its audio
     converter imports fmod_toolkit at module load time, which currently aborts
-    on Android even when the caller only needs image conversion. A narrow
-    placeholder lets non-audio exporters load; unsupported FMOD conversion
-    still fails explicitly if it is ever requested.
+    on Android even when the caller only needs image conversion or already
+    encoded audio samples. A narrow placeholder lets the remaining exporters
+    load; FMOD-backed PCM conversion still fails explicitly if requested.
     """
     if platform.system() != "Android" or "fmod_toolkit" in sys.modules:
         return
@@ -65,22 +67,74 @@ def _enum_name(value: Any) -> str | None:
     return str(name if name is not None else value)
 
 
+def _number(value: Any) -> int | float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _audio_sample_name(value: Any) -> tuple[str, str]:
+    """Return a sanitized sample stem and a safe extension.
+
+    UnityPy returns sample keys such as ``name.wav`` or ``name-1.wav``.
+    Unknown extensions are preserved as raw ``.bin`` output rather than
+    converted into a format the project has not validated.
+    """
+    name = str(value or "")
+    suffix = Path(name).suffix.lower()
+    if suffix in AUDIO_EXTENSIONS:
+        return _safe_stem(name[: -len(suffix)]), suffix
+    return _safe_stem(name), ".bin"
+
+
+def _unique_relative_path(relative: Path, used: set[str]) -> Path:
+    candidate = relative
+    index = 2
+    while candidate.as_posix() in used:
+        candidate = relative.with_name(f"{relative.stem}_{index}{relative.suffix}")
+        index += 1
+    used.add(candidate.as_posix())
+    return candidate
+
+
 class ResourceExporter:
     """Export supported objects while their source container is still loaded.
 
     TextAsset payloads are preserved byte-for-byte. Texture2D and Sprite
-    objects are decoded by UnityPy and written as PNG images.
+    objects are decoded by UnityPy and written as PNG images. AudioClip
+    samples are preserved in the format returned by the backend.
     """
 
-    def __init__(self, output_dir: str | Path) -> None:
+    def __init__(
+        self,
+        output_dir: str | Path,
+        destination_map: dict[str, str] | None = None,
+        selected_resource_ids: set[str] | None = None,
+    ) -> None:
         self.output_dir = Path(output_dir).expanduser()
+        self.destination_map = destination_map or {}
+        self.selected_resource_ids = selected_resource_ids
         self.records: list[dict[str, Any]] = []
 
     def __call__(self, obj: Any, record: ObjectRecord) -> None:
         self.export_object(obj, record)
 
+    def _mapped_relative(self, record: ObjectRecord) -> Path | None:
+        value = self.destination_map.get(record.resource_id)
+        if value is None:
+            return None
+        relative = Path(value)
+        if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+            raise ValueError(f"Unsafe preset destination: {value!r}")
+        return relative
+
     def export_object(self, obj: Any, record: ObjectRecord) -> dict[str, Any] | None:
-        if record.type_name not in {"TextAsset", "Texture2D", "Sprite"}:
+        if record.type_name not in SUPPORTED_TYPES:
+            return None
+        if (
+            self.selected_resource_ids is not None
+            and record.resource_id not in self.selected_resource_ids
+        ):
             return None
 
         entry: dict[str, Any] = {
@@ -96,10 +150,13 @@ class ResourceExporter:
         }
         try:
             parsed = obj.parse_as_object()
+            mapped = self._mapped_relative(record)
             if record.type_name == "TextAsset":
-                self._export_text_asset(parsed, record, entry)
+                self._export_text_asset(parsed, record, entry, mapped)
+            elif record.type_name == "AudioClip":
+                self._export_audio_clip(parsed, record, entry, mapped)
             else:
-                self._export_image(parsed, record, entry)
+                self._export_image(parsed, record, entry, mapped)
         except Exception as exc:
             entry["warnings"].append(f"{type(exc).__name__}: {exc}")
 
@@ -107,7 +164,11 @@ class ResourceExporter:
         return entry
 
     def _export_text_asset(
-        self, parsed: Any, record: ObjectRecord, entry: dict[str, Any]
+        self,
+        parsed: Any,
+        record: ObjectRecord,
+        entry: dict[str, Any],
+        mapped: Path | None,
     ) -> None:
         payload = getattr(parsed, "m_Script")
         if isinstance(payload, str):
@@ -117,7 +178,7 @@ class ResourceExporter:
         else:
             raise TypeError(f"Unsupported TextAsset payload type: {type(payload).__name__}")
 
-        relative = Path("text") / (
+        relative = mapped or Path("text") / (
             f"{_safe_stem(record.name)}__{record.path_id}_{record.resource_id[:10]}.txt"
         )
         destination = self.output_dir / relative
@@ -132,7 +193,11 @@ class ResourceExporter:
         })
 
     def _export_image(
-        self, parsed: Any, record: ObjectRecord, entry: dict[str, Any]
+        self,
+        parsed: Any,
+        record: ObjectRecord,
+        entry: dict[str, Any],
+        mapped: Path | None,
     ) -> None:
         _prepare_unitypy_export_import()
         image = getattr(parsed, "image")
@@ -153,9 +218,16 @@ class ResourceExporter:
             )
 
         folder = "texture2d" if record.type_name == "Texture2D" else "sprite"
-        relative = Path("images") / folder / (
-            f"{_safe_stem(record.name)}__{record.path_id}_{record.resource_id[:10]}.png"
-        )
+        if mapped is not None:
+            if mapped.suffix.lower() != ".png":
+                raise ValueError(
+                    f"Preset image destination must end with .png: {mapped.as_posix()!r}"
+                )
+            relative = mapped
+        else:
+            relative = Path("images") / folder / (
+                f"{_safe_stem(record.name)}__{record.path_id}_{record.resource_id[:10]}.png"
+            )
         destination = self.output_dir / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_name(destination.name + ".tmp")
@@ -188,6 +260,84 @@ class ResourceExporter:
             "format": "PNG",
         })
 
+    def _export_audio_clip(
+        self,
+        parsed: Any,
+        record: ObjectRecord,
+        entry: dict[str, Any],
+        mapped: Path | None,
+    ) -> None:
+        _prepare_unitypy_export_import()
+        samples = getattr(parsed, "samples", None)
+        if not isinstance(samples, dict) or not samples:
+            raise ValueError("AudioClip did not expose any decodable samples.")
+
+        used_paths: set[str] = set()
+        clip_stem = _safe_stem(record.name)
+        for index, (sample_name, payload) in enumerate(samples.items()):
+            try:
+                if not isinstance(payload, (bytes, bytearray, memoryview)):
+                    raise TypeError(
+                        f"Unsupported audio sample payload type: {type(payload).__name__}"
+                    )
+                data = bytes(payload)
+                if not data:
+                    raise ValueError("Audio sample is empty.")
+
+                stem, extension = _audio_sample_name(sample_name)
+                if mapped is None:
+                    relative = _unique_relative_path(
+                        Path("audio")
+                        / f"{clip_stem}__{record.path_id}_{record.resource_id[:10]}__{stem}{extension}",
+                        used_paths,
+                    )
+                elif index == 0:
+                    relative = _unique_relative_path(mapped, used_paths)
+                else:
+                    suffix = mapped.suffix or extension
+                    relative = _unique_relative_path(
+                        mapped.with_name(f"{mapped.stem}_{index}{suffix}"),
+                        used_paths,
+                    )
+                destination = self.output_dir / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                temporary = destination.with_name(destination.name + ".tmp")
+                try:
+                    temporary.write_bytes(data)
+                    temporary.replace(destination)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            except Exception as exc:
+                entry["warnings"].append(
+                    f"Sample {index} ({sample_name!r}): {type(exc).__name__}: {exc}"
+                )
+                continue
+
+            entry["artifacts"].append({
+                "path": relative.as_posix(),
+                "size_bytes": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "format": extension.lstrip(".").upper(),
+                "sample_index": index,
+                "sample_name": str(sample_name),
+            })
+
+        entry["metadata"] = {
+            "sample_count": len(samples),
+            "exported_sample_count": len(entry["artifacts"]),
+            "channels": _number(getattr(parsed, "m_Channels", None)),
+            "sample_rate": _number(getattr(parsed, "m_Frequency", None)),
+            "duration_seconds": _number(getattr(parsed, "m_Length", None)),
+            "bits_per_sample": _number(getattr(parsed, "m_BitsPerSample", None)),
+            "source_compression_format": _enum_name(
+                getattr(parsed, "m_CompressionFormat", None)
+            ),
+            "source_load_type": _enum_name(getattr(parsed, "m_LoadType", None)),
+        }
+        # Keep a partially exported clip visible as failed instead of hiding it.
+        if entry["artifacts"] and not entry["warnings"]:
+            entry["status"] = "exported"
+
     def write_manifest(self) -> Path:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         manifest = {
@@ -198,7 +348,7 @@ class ResourceExporter:
                 if all(item["status"] == "exported" for item in self.records)
                 else "partial"
             ),
-            "supported_types": ["TextAsset", "Texture2D", "Sprite"],
+            "supported_types": list(SUPPORTED_TYPES),
             "selected_object_count": len(self.records),
             "exported_object_count": sum(item["status"] == "exported" for item in self.records),
             "failed_object_count": sum(item["status"] == "failed" for item in self.records),
@@ -212,7 +362,7 @@ class ResourceExporter:
 
     def summary(self) -> dict[str, Any]:
         return {
-            "supported_types": ["TextAsset", "Texture2D", "Sprite"],
+            "supported_types": list(SUPPORTED_TYPES),
             "selected_object_count": len(self.records),
             "exported_object_count": sum(item["status"] == "exported" for item in self.records),
             "failed_object_count": sum(item["status"] == "failed" for item in self.records),

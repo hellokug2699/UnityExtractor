@@ -1,7 +1,7 @@
 """Canonical, JSON-safe models for P1 object enumeration and references."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 from .resource_classifier import classify_unity_type
@@ -57,8 +57,15 @@ class EnumerationReport:
     inspected_containers: int = 0
     objects: list[ObjectRecord] = field(default_factory=list)
     references: list[ObjectReference] = field(default_factory=list)
+    addressables: dict[str, Any] = field(default_factory=dict)
+    # Full catalog key rows stay in memory for adapters and are not serialized
+    # into the scan report, which only contains bounded samples.
+    catalog_key_entries: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        # Avoid deep-copying potentially large in-memory adapter rows.
+        data = asdict(replace(self, catalog_key_entries=[]))
+        data.pop("catalog_key_entries", None)
+        return data
