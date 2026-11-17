@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from .resource_classifier import classify_unity_type
+
 
 @dataclass
 class ObjectRecord:
@@ -20,6 +22,17 @@ class ObjectRecord:
     metadata: dict[str, Any] = field(default_factory=dict)
     decode_status: str = "metadata_only"
     warnings: list[str] = field(default_factory=list)
+    resource_category: str = "unknown"
+    resource_subcategory: str = "unknown"
+    classification_confidence: str = "unknown"
+    classification_basis: str = "unrecognized_unity_type"
+
+    def __post_init__(self) -> None:
+        classification = classify_unity_type(self.type_name)
+        self.resource_category = classification.category
+        self.resource_subcategory = classification.subcategory
+        self.classification_confidence = classification.confidence
+        self.classification_basis = classification.basis
 
 
 @dataclass
