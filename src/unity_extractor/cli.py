@@ -18,6 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--format", choices=("text", "json"), default="text", help="Report format")
     parser.add_argument("--output", help="Write the report to this file instead of stdout")
     parser.add_argument("--enumerate-objects", action="store_true", help="Enumerate Unity objects using the optional UnityPy backend")
+    parser.add_argument("--analyze-references", action="store_true", help="Parse serialized object data and enumerate PPtr references (requires --enumerate-objects)")
     parser.add_argument("--max-container-mb", type=int, default=512, help="Maximum size of one candidate container in MiB (default: 512)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
@@ -79,6 +80,9 @@ def render_object_text(report: dict) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.analyze_references and not args.enumerate_objects:
+        print("--analyze-references requires --enumerate-objects.", file=sys.stderr)
+        return 2
     if args.max_container_mb < 1:
         print("--max-container-mb must be at least 1.", file=sys.stderr)
         return 2
@@ -88,7 +92,8 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             enumerator = UnityObjectEnumerator(
-                max_container_bytes=args.max_container_mb * 1024 * 1024
+                max_container_bytes=args.max_container_mb * 1024 * 1024,
+                include_references=args.analyze_references
             )
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
