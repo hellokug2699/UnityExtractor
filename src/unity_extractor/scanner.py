@@ -95,8 +95,12 @@ class UnityScanner:
                 self._inspect_name(rel, report)
                 try:
                     size = file_path.stat().st_size
-                    if size > MAX_ENTRY_READ or total_read >= MAX_TOTAL_READ:
+                    if size > MAX_ENTRY_READ:
+                        report.warnings.append(f"Skipped oversized file: {rel}")
                         continue
+                    if total_read >= MAX_TOTAL_READ:
+                        report.warnings.append(f"Total read limit reached ({MAX_TOTAL_READ} bytes); remaining file contents were not inspected.")
+                        return
                     data = _read_prefix(file_path, min(MAX_ENTRY_READ, MAX_TOTAL_READ - total_read))
                     total_read += len(data)
                     self._inspect_bytes(rel, data, report)
