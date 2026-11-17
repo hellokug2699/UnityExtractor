@@ -55,3 +55,14 @@ def test_json_report_is_serializable(tmp_path):
     report = UnityScanner().scan(folder)
     payload = json.dumps(report.to_dict())
     assert '"schema_version": "1.0"' in payload
+
+
+def test_linker_xml_does_not_imply_mono(tmp_path):
+    apk = tmp_path / "il2cpp.apk"
+    with zipfile.ZipFile(apk, "w") as archive:
+        archive.writestr("lib/arm64-v8a/libunity.so", b"ELF")
+        archive.writestr("lib/arm64-v8a/libil2cpp.so", b"ELF")
+        archive.writestr("assets/aa/AddressablesLink/link.xml", b'<linker><assembly fullname="Assembly-CSharp" /></linker>')
+    report = UnityScanner().scan(apk)
+    assert report.scripting_backend == "IL2CPP"
+    assert not any(f.kind == "mono" for f in report.findings)
