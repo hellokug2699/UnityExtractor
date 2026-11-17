@@ -8,6 +8,14 @@ import zipfile
 from pathlib import Path
 from typing import Any, Iterable
 
+from .addressables import (
+    MAX_CATALOG_BYTES,
+    MAX_CATALOGS,
+    MAX_CATALOG_TOTAL_BYTES,
+    build_addressables_report,
+    inspect_catalog,
+    is_catalog_candidate_name,
+)
 from .backends.unitypy import UnityPyBackend
 from .object_models import EnumerationReport, ObjectRecord, ObjectReference
 from .scanner import BUNDLE_MAGICS, _looks_like_serialized_header
@@ -61,9 +69,13 @@ class UnityObjectEnumerator:
         self.include_references = include_references
         self.max_references = max_references
         self.object_callback = object_callback
+        self._catalog_entries: list[tuple[dict[str, Any], list[str]]] = []
+        self._catalog_bytes = 0
 
     def enumerate(self, input_path: str | os.PathLike[str]) -> EnumerationReport:
         path = Path(input_path).expanduser()
+        self._catalog_entries = []
+        self._catalog_bytes = 0
         report = EnumerationReport(
             schema_version="1.0",
             input_path=str(path),
@@ -82,8 +94,21 @@ class UnityObjectEnumerator:
                 self._enumerate_archive(path, report)
             elif path.is_file():
                 size = path.stat().st_size
+                is_catalog = is_catalog_candidate_name(path.name)
+                if is_catalog:
+                    self._inspect_catalog_file(path, str(path.resolve()), report)
                 if size > self.max_container_bytes:
                     report.warnings.append(f"Skipped oversized standalone input ({size} bytes).")
+                elif is_catalog:
+                    with path.open("rb") as stream:
+                        prefix = stream.read(32)
+                    if _is_candidate(prefix):
+                        self._enumerate_file(path, str(path.resolve()), report)
+                    else:
+                        report.warnings.append(
+                            "Standalone catalog candidate has no Unity container signature; "
+                            "object enumeration was skipped."
+                        )
                 else:
                     self._enumerate_file(path, str(path.resolve()), report)
             else:
@@ -91,6 +116,12 @@ class UnityObjectEnumerator:
                 report.errors.append("Input is neither a regular file nor a directory.")
         except Exception as exc:
             report.errors.append(f"{type(exc).__name__}: {exc}")
+
+        if self._catalog_entries:
+            report.addressables = build_addressables_report(
+                self._catalog_entries,
+                (record.source_id for record in report.objects),
+            )
 
         if report.errors and report.objects:
             report.scan_status = "partial"
@@ -109,20 +140,24 @@ class UnityObjectEnumerator:
                     report.warnings.append(f"Container limit reached ({MAX_CONTAINERS}).")
                     return
                 source = Path(current) / name
+                rel = source.relative_to(root).as_posix()
+                logical_source_id = f"{root.resolve()}!/{rel}"
                 try:
                     size = source.stat().st_size
+                    if is_catalog_candidate_name(name):
+                        self._inspect_catalog_file(source, logical_source_id, report)
                     with source.open("rb") as stream:
                         prefix = stream.read(32)
                     if not _is_candidate(prefix):
                         continue
                     if size > self.max_container_bytes:
-                        report.warnings.append(f"Skipped oversized candidate: {source.relative_to(root).as_posix()}")
+                        report.warnings.append(f"Skipped oversized candidate: {rel}")
                         continue
                     if total_bytes + size > self.max_total_bytes:
                         report.warnings.append("Total container byte limit reached; remaining candidate files were not inspected.")
                         return
                     total_bytes += size
-                    self._enumerate_file(source, f"{root.resolve()}!/{source.relative_to(root).as_posix()}", report)
+                    self._enumerate_file(source, logical_source_id, report)
                 except OSError as exc:
                     report.warnings.append(f"Could not inspect {source}: {exc}")
 
@@ -141,6 +176,8 @@ class UnityObjectEnumerator:
                     # so unrelated APK entries cannot consume the candidate budget.
                     with archive.open(info) as stream:
                         prefix = stream.read(32)
+                    if is_catalog_candidate_name(logical_name):
+                        self._inspect_archive_catalog(archive, info, logical_name, archive_path, report)
                     if not _is_candidate(prefix):
                         continue
                     if info.file_size > self.max_container_bytes:
@@ -187,6 +224,81 @@ class UnityObjectEnumerator:
                     temp_path.unlink(missing_ok=True)
                 except OSError as exc:
                     report.warnings.append(f"Could not remove temporary parser input: {exc}")
+
+    def _inspect_catalog_file(self, source: Path, logical_source_id: str, report: EnumerationReport) -> None:
+        try:
+            size = source.stat().st_size
+            if size > MAX_CATALOG_BYTES:
+                report.warnings.append(
+                    f"Skipped oversized Addressables catalog: {logical_source_id}"
+                )
+                return
+            with source.open("rb") as stream:
+                data = stream.read(MAX_CATALOG_BYTES + 1)
+        except OSError as exc:
+            report.warnings.append(
+                f"Could not read Addressables catalog {logical_source_id}: {exc}"
+            )
+            return
+        self._record_catalog(source.name, logical_source_id, data, report)
+
+    def _inspect_archive_catalog(
+        self,
+        archive: zipfile.ZipFile,
+        info: zipfile.ZipInfo,
+        logical_name: str,
+        archive_path: Path,
+        report: EnumerationReport,
+    ) -> None:
+        logical_source_id = f"{archive_path}!/{logical_name}"
+        if info.file_size > MAX_CATALOG_BYTES:
+            report.warnings.append(
+                f"Skipped oversized Addressables catalog: {logical_source_id}"
+            )
+            return
+        if info.compress_size and info.file_size / info.compress_size > MAX_COMPRESSION_RATIO:
+            report.warnings.append(
+                f"Skipped Addressables catalog with a suspicious compression ratio: {logical_source_id}"
+            )
+            return
+        try:
+            with archive.open(info) as stream:
+                data = stream.read(MAX_CATALOG_BYTES + 1)
+        except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+            report.warnings.append(
+                f"Could not read Addressables catalog {logical_source_id}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return
+        self._record_catalog(logical_name, logical_source_id, data, report)
+
+    def _record_catalog(
+        self,
+        name: str,
+        logical_source_id: str,
+        data: bytes,
+        report: EnumerationReport,
+    ) -> None:
+        if len(self._catalog_entries) >= MAX_CATALOGS:
+            report.warnings.append(f"Addressables catalog limit reached ({MAX_CATALOGS}).")
+            return
+        if len(data) > MAX_CATALOG_BYTES:
+            report.warnings.append(
+                f"Addressables catalog exceeds the {MAX_CATALOG_BYTES}-byte limit: "
+                f"{logical_source_id}"
+            )
+            return
+        if self._catalog_bytes + len(data) > MAX_CATALOG_TOTAL_BYTES:
+            report.warnings.append(
+                "Total Addressables catalog byte limit reached; "
+                "remaining catalogs were not inspected."
+            )
+            return
+        self._catalog_bytes += len(data)
+        entry, internal_ids = inspect_catalog(logical_source_id, name, data)
+        self._catalog_entries.append((entry, internal_ids))
+        for warning in entry["warnings"]:
+            report.warnings.append(f"{logical_source_id}: {warning}")
 
     def _enumerate_file(self, source: Path, logical_source_id: str, report: EnumerationReport) -> None:
         try:

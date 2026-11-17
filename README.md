@@ -134,6 +134,21 @@ P2.1 的导出结果写入 `--export-dir` 指定目录：
 
 P2.3 已加入 `AudioClip` 样本导出，写入 `audio/`。样本保持后端返回的格式（`.wav` / `.ogg` / `.m4a`），未知格式保留为 `.bin` 原始字节，不进行未经验证的转码。多样本 AudioClip 会分别导出多个文件，并在清单中通过同一来源对象、`sample_index` 和 `sample_name` 关联。清单同时记录声道数、采样率、时长、位深、源压缩格式和加载类型（可读取时）。单个样本失败或为空时记录 warning 并继续导出其余样本；只要存在失败样本，该 AudioClip 在清单中标记为 failed，已成功导出的样本仍会保留。没有任何可导出样本的 AudioClip 同样标记为失败。对象枚举报告与导出清单是两个独立输出文件。
 
+## 资源布局与 Addressables（P3）
+
+对象枚举会同时检查文件名包含 `catalog` 且扩展名为 `.json`、`.bin` 或 `.bytes` 的候选文件，不依赖固定目录。只有包含 `m_LocatorId`、`m_InternalIds` 或 `m_ProviderIds` 标记的 JSON 才会被认定为 Addressables catalog；普通 JSON 不会因此被当作 Addressables。
+
+```bash
+unity-extractor /path/to/game.apk --enumerate-objects --format json --output objects.json
+```
+
+报告的 `addressables` 字段包含：
+
+- `catalogs`：候选路径、校验状态、locator ID、构建哈希、内部 ID 与 Provider 数量、运行时路径占位符、key 映射状态和 warning；
+- `summary`：候选数、已验证数、内部 ID 总数、按文件名匹配到的容器数、未解析数及未解析样例。
+
+内部 ID 仅按文件名与本次实际发现的容器匹配，不会伪造不存在的依赖。未匹配项保留在 `unresolved_internal_id_samples` 中。二进制 catalog 暂不解析；`m_KeyDataString` / bucket / entry 映射尚未解码，统一标记为 `unsupported`，不会根据 key 猜测资源关系。单个 catalog 上限 8 MiB，最多 16 个，合计 32 MiB。传统 AssetBundle 和独立 SerializedFile 仍按原有路径发现，Addressables 不是必需布局。
+
 ## 安全与限制
 
 - 不执行游戏包内代码。

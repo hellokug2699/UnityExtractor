@@ -86,6 +86,19 @@ def render_object_text(report: dict) -> str:
             f"  Failed objects: {export['failed_object_count']}",
             f"  Manifest: {export['manifest_path']}",
         ])
+    addressables = report.get("addressables")
+    if addressables:
+        summary = addressables["summary"]
+        lines.extend([
+            "",
+            "Addressables:",
+            f"  Catalog candidates: {summary['catalog_candidate_count']}",
+            f"  Validated catalogs: {summary['validated_catalog_count']}",
+            f"  Internal IDs: {summary['internal_id_count']}",
+            f"  Matched internal IDs: {summary['matched_internal_id_count']}",
+            f"  Unresolved internal IDs: {summary['unresolved_internal_id_count']}",
+            f"  Key mapping: {summary['key_mapping_status']}",
+        ])
     graph = report.get("dependency_graph")
     if graph:
         summary = graph["summary"]

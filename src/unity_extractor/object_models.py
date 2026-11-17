@@ -57,6 +57,7 @@ class EnumerationReport:
     inspected_containers: int = 0
     objects: list[ObjectRecord] = field(default_factory=list)
     references: list[ObjectReference] = field(default_factory=list)
+    addressables: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 

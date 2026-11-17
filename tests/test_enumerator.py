@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -184,6 +185,106 @@ def test_reference_analysis_without_backend_support_is_a_warning(tmp_path):
     assert report.references == []
     assert any("not supported by the selected parser backend" in item for item in report.warnings)
 
+
+
+def make_catalog(internal_ids: list[str], *, locator: str = "MainCatalog") -> bytes:
+    return json.dumps({
+        "m_LocatorId": locator,
+        "m_InternalIds": internal_ids,
+        "m_ProviderIds": ["AssetBundleProvider"],
+        "m_KeyDataString": "AQAAAA==",
+    }).encode("utf-8")
+
+
+def test_apk_catalog_is_inspected_alongside_unity_containers(tmp_path):
+    apk = tmp_path / "game.apk"
+    with zipfile.ZipFile(apk, "w") as archive:
+        archive.writestr(
+            "assets/aa/catalog.json",
+            make_catalog([
+                "{UnityEngine.AddressableAssets.Addressables.RuntimePath}/assets/ab/level.bin"
+            ]),
+        )
+        archive.writestr("assets/ab/level.bin", b"UnityFS" + b"\0" * 64)
+
+    report = UnityObjectEnumerator(
+        backend=FakeBackend([FakeObject(77, "level")])
+    ).enumerate(apk)
+
+    assert report.inspected_containers == 1
+    assert len(report.objects) == 1
+    summary = report.addressables["summary"]
+    assert summary["catalog_candidate_count"] == 1
+    assert summary["validated_catalog_count"] == 1
+    assert summary["internal_id_count"] == 1
+    assert summary["matched_internal_id_count"] == 1
+    assert summary["unresolved_internal_id_count"] == 0
+    assert summary["key_mapping_status"] == "unsupported"
+    assert report.to_dict()["addressables"] == report.addressables
+
+
+def test_invalid_apk_catalog_does_not_abort_object_enumeration(tmp_path):
+    apk = tmp_path / "game.apk"
+    with zipfile.ZipFile(apk, "w") as archive:
+        archive.writestr("assets/aa/catalog.json", b"{not json")
+        archive.writestr("assets/ab/level.bin", b"UnityFS" + b"\0" * 64)
+
+    report = UnityObjectEnumerator(
+        backend=FakeBackend([FakeObject(78, "level")])
+    ).enumerate(apk)
+
+    assert report.scan_status == "completed"
+    assert len(report.objects) == 1
+    catalog = report.addressables["catalogs"][0]
+    assert catalog["status"] == "failed"
+    assert report.addressables["summary"]["validated_catalog_count"] == 0
+    assert any("Catalog JSON is invalid" in warning for warning in report.warnings)
+
+
+def test_unrelated_json_is_not_reported_as_addressables(tmp_path):
+    apk = tmp_path / "game.apk"
+    with zipfile.ZipFile(apk, "w") as archive:
+        archive.writestr("assets/aa/settings.json", b'{"hello": 1}')
+        archive.writestr("assets/ab/level.bin", b"UnityFS" + b"\0" * 64)
+
+    report = UnityObjectEnumerator(
+        backend=FakeBackend([FakeObject(79, "level")])
+    ).enumerate(apk)
+
+    assert report.addressables == {}
+    assert len(report.objects) == 1
+
+
+def test_catalog_json_without_markers_is_reported_but_not_validated(tmp_path):
+    apk = tmp_path / "game.apk"
+    with zipfile.ZipFile(apk, "w") as archive:
+        archive.writestr("assets/aa/catalog.json", b'{"hello": 1}')
+
+    report = UnityObjectEnumerator(backend=FakeBackend([])).enumerate(apk)
+
+    summary = report.addressables["summary"]
+    assert summary["catalog_candidate_count"] == 1
+    assert summary["validated_catalog_count"] == 0
+    assert report.addressables["catalogs"][0]["status"] == "candidate_unvalidated"
+
+
+def test_directory_catalog_is_inspected_without_consuming_container_limits(tmp_path):
+    root = tmp_path / "game"
+    (root / "assets" / "aa").mkdir(parents=True)
+    (root / "assets" / "aa" / "catalog.json").write_bytes(
+        make_catalog(["assets/real.bundle"])
+    )
+    (root / "assets" / "real.bundle").write_bytes(b"UnityFS" + b"\0" * 64)
+
+    report = UnityObjectEnumerator(
+        backend=FakeBackend([FakeObject(80, "real")])
+    ).enumerate(root)
+
+    assert report.inspected_containers == 1
+    assert len(report.objects) == 1
+    summary = report.addressables["summary"]
+    assert summary["validated_catalog_count"] == 1
+    assert summary["matched_internal_id_count"] == 1
 
 
 def test_object_callback_runs_before_staged_apk_member_is_removed(tmp_path):
