@@ -66,7 +66,7 @@ def render_object_text(report: dict) -> str:
     ]
     for obj in report["objects"]:
         lines.append(
-            f"  - {obj['type_name']} | {obj['name'] or '<unnamed>'} | "
+            f"  - {obj['type_name']} [{obj['resource_category']}/{obj['resource_subcategory']}] | {obj['name'] or '<unnamed>'} | "
             f"Path ID: {obj['path_id']} | Size: {obj['size_bytes'] if obj['size_bytes'] is not None else 'unknown'}"
         )
         lines.append(f"      Container: {obj['container_id']}")
