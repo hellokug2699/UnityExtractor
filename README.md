@@ -145,3 +145,21 @@ P2.1 的导出结果写入 `--export-dir` 指定目录：
 python -m pip install -e ".[dev,unity]"
 python -m pytest -v
 ```
+
+
+## 导出压缩包验证
+
+可以在本地将导出目录压缩为 ZIP，再使用独立验证命令逐个核对 ZIP 内的文件与导出清单。验证器直接从 ZIP 流式读取数据，不会将整个压缩包解压到磁盘。
+
+建议从导出目录内部创建 ZIP，使 ZIP 内部路径与 Manifest 的相对路径一致，并将清单一并放在 ZIP 根目录：
+
+    cd ./unity-export
+    zip -r -1 ../unity-export.zip .
+
+安装项目后即可验证：
+
+    unity-extractor-verify-archive ../unity-export.zip \
+      --manifest ./export-manifest.json \
+      --output ../archive-verification.json
+
+验证器会检查 Manifest 状态、每个文件的存在性、文件大小、SHA-256、重复路径、额外文件和路径安全性，并确认 ZIP 内的 export-manifest.json 与外部清单完全一致。成功返回码为 0，验证失败返回码为 1；无法写入报告等命令错误返回码为 2。验证报告为 JSON，可用于后续归档验收。
