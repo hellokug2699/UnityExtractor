@@ -106,3 +106,20 @@ def test_object_limit_is_enforced(tmp_path):
 
     assert len(report.objects) == 1
     assert any("Object limit reached" in warning for warning in report.warnings)
+
+
+def test_resource_identity_ignores_random_staging_parent_name(tmp_path):
+    source = tmp_path / "fixture.bundle"
+    source.write_bytes(b"fixture")
+
+    first = FakeObject(123, "stable")
+    first.assets_file.parent.name = "unityextractor-random-a.bundle"
+    second = FakeObject(123, "stable")
+    second.assets_file.parent.name = "unityextractor-random-b.bundle"
+
+    first_report = UnityObjectEnumerator(backend=FakeBackend([first])).enumerate(source)
+    second_report = UnityObjectEnumerator(backend=FakeBackend([second])).enumerate(source)
+
+    assert first_report.objects[0].container_id == "sharedassets0.assets"
+    assert second_report.objects[0].container_id == "sharedassets0.assets"
+    assert first_report.objects[0].resource_id == second_report.objects[0].resource_id
